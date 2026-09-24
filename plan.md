@@ -101,7 +101,12 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `npm test` | ok — 84/84 passed (23 new tool tests: registry, fs, globToRegExp, patch, bash gate, web scheme, git not-a-repo) |
 | 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
 | 2026-09-24 | direct registry smoke (temp-ws): `write_file` round-trip + `list_dir` | ok — 12 tools advertised (`read_file,write_file,list_dir,stat,glob,patch,bash,fetch_url,git_status,git_log,git_diff,git_show`); wrote 6 bytes to note.txt |
+| 2026-09-24 | `npm i ollama-js` Ollama SDK version note | see row above — ollama ^0.6.3 |
 | 2026-09-24 | live Ollama tool round-trip (`qwen2.5-coder:7b`, `--max-turns 4`) | **partial** — loop executed 0 tool turns because this qwen2.5-coder build returns tool calls as *text* (`{"name":"write_file",...}` in `content`), not native `tool_calls`. Verified directly against Ollama 0.34.2 `/api/chat`. Registry + loop tool wiring covered by unit tests instead |
+| 2026-09-24 | live Ollama tool round-trip (`llama3.2:3b`, `--provider ollama --model llama3.2:3b --ctx 2048 --max-turns 6`, in temp `live-ws`) | **ok** — native `tool_calls` end-to-end: agent called `write_file(greetings.txt,"hello from llama3.2")`, file landed on disk (SHA-256 `331CB6…`), final answer `[completed] 2 turn(s) · 1119 in / 58 out`. Confirms the loop + registry + provider wiring works against a real tool-native model |
+| 2026-09-24 | raw Ollama `/api/chat` (llama3.2:3b, tool payload) | **ok** — native `tool_calls` array returned; first tool-mapping result under qwen2.5-coder:7b was a model build difference, not a wiring bug |
+| 2026-09-24 | `npm run lint` + `npm test` + `npm run build` (`--ctx` num_ctx feature) | ok — 88/88 (8 files, +4: loop numContext passthrough ×1, ollama num_ctx mapping ×2, mapping sanity ×1) |
+| 2026-09-24 | live Ollama context regression — `--ctx 2048` | **required on this machine**: bare llama3.2:3b fails at serve (`ggml CPU buffer 63.9 GB for KV cache`) with `OLLAMA_NUM_PARALLEL=8`; passing `options.num_ctx=2048` fixes it. Committed as `3520cda`
 
 > Final Phase 0 gate output gets pasted here before the phase commit.
 
@@ -162,7 +167,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] `src/tools/index.ts`: `defaultToolDefinitions()` (fs + patch + bash + web + git) + `createDefaultRegistry()`
 - [x] CLI: `ask` wires the registry by default; `--no-tools` = plain chat; `--no-bash` = advertise but keep the shell gated (bash stays gated unless the operator opts in)
 - [x] tests → done (23: registry advertising/unknown-tool/bad-JSON/zod-path/error-recovery, fs round-trip/traversal-escape/absolute-escape/`..\`-escape/list/stat/glob, globToRegExp no-slash-crossing, patch unique/atomic/ambiguous, bash gate + run, web scheme guard, git not-a-repo)
-- [x] phase gate: lint ok, test 84/84, build ok, smoke partial (see verification record — qwen2.5-coder:7b returns tool calls as text, not native `tool_calls`) → commit on `phase/4-tools`
+- [x] phase gate: lint ok, test 84/84, build ok, smoke partial initially (qwen2.5-coder:7b text-tools) → **ok after re-verify** on `llama3.2:3b` (native tool calls, live 2-turn round-trip; see verification record) → committed on `phase/4-tools` (`1390502`)
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
