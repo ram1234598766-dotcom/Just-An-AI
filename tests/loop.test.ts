@@ -117,6 +117,18 @@ describe("runAgentLoop", () => {
     expect(result.messages[2]?.content).toMatch(/explode/);
   });
 
+  it("passes numContext and temperature through to the adapter request", async () => {
+    const model = makeModel([assistant("done")]);
+    await runAgentLoop({
+      model,
+      messages: [{ role: "user", content: "hi" }],
+      executeTool: async () => "",
+      temperature: 0.2,
+      numContext: 2048,
+    });
+    expect(model.adapter.requested[0]).toMatchObject({ temperature: 0.2, numContext: 2048 });
+  });
+
   it("trims per-request context to the token budget but returns the full transcript", async () => {
     const model = makeModel([assistant("done")]);
     const messages: ChatMessage[] = [

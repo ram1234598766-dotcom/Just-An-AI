@@ -44,6 +44,8 @@ export interface AgentLoopOptions {
   /** Context budget in estimated tokens. Default DEFAULT_TOKEN_BUDGET. */
   tokenBudget?: number;
   temperature?: number;
+  /** Provider context window override (e.g. ollama num_ctx). */
+  numContext?: number;
   /** Fired when the model produces an assistant message (before tool execution). */
   onAssistantMessage?: (msg: ChatMessage) => void;
   /** Fired before a tool call is executed. */
@@ -77,6 +79,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     };
     if (options.tools !== undefined && options.tools.length > 0) request.tools = options.tools;
     if (options.temperature !== undefined) request.temperature = options.temperature;
+    if (options.numContext !== undefined) request.numContext = options.numContext;
 
     const response = await options.model.adapter.chat(request);
     inputTokens += response.usage.inputTokens;

@@ -65,6 +65,7 @@ export function createOllamaAdapter({ id, host }: OllamaOptions): ProviderAdapte
       const options: Partial<Options> = {};
       if (req.temperature !== undefined) options.temperature = req.temperature;
       if (req.maxTokens !== undefined) options.num_predict = req.maxTokens;
+      if (req.numContext !== undefined) options.num_ctx = req.numContext;
 
       const resp = await client.chat({
         ...chatRequest,

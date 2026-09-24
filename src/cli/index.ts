@@ -166,6 +166,7 @@ program
   .option("--max-turns <n>", "cap the agent loop at n turns", parsePositiveInt)
   .option("--token-budget <n>", "context budget in estimated tokens", parsePositiveInt)
   .option("--temperature <n>", "sampling temperature", parseFloat)
+  .option("--ctx <n>", "context window in tokens (ollama num_ctx)", parsePositiveInt)
   .option("--resume <id>", "continue an existing session")
   .option("--save", "persist the conversation to a new session")
   .option("--no-tools", "run without tool access (plain chat only)")
@@ -177,6 +178,7 @@ program
     maxTurns?: number;
     tokenBudget?: number;
     temperature?: number;
+    ctx?: number;
     resume?: string;
     save?: boolean;
     tools?: boolean;
@@ -218,6 +220,7 @@ program
     if (opts.maxTurns !== undefined) loopOptions.maxTurns = opts.maxTurns;
     if (opts.tokenBudget !== undefined) loopOptions.tokenBudget = opts.tokenBudget;
     if (opts.temperature !== undefined) loopOptions.temperature = opts.temperature;
+    if (opts.ctx !== undefined) loopOptions.numContext = opts.ctx;
     const result = await runAgentLoop(loopOptions);
 
     const delta = result.messages.slice(resumed ? resumed.messages.length : messages.length);

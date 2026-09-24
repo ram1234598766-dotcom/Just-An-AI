@@ -33,6 +33,8 @@ export interface ChatRequest {
   messages: ChatMessage[];
   temperature?: number;
   maxTokens?: number;
+  /** Provider context window overrides (ollama num_ctx). */
+  numContext?: number;
   tools?: ToolDef[];
 }
 
