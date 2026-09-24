@@ -37,8 +37,12 @@
     "pack:dryrun": "npm pack --dry-run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@google/genai": "^2.24.0",
     "commander": "^15.0.0",
     "dotenv": "^18.0.3",
+    "ollama": "^0.6.3",
+    "openai": "^7.23.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

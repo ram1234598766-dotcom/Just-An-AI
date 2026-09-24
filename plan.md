@@ -12,8 +12,8 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | # | Phase | Branch | Status |
 |---|-------|--------|--------|
 | 0 | Repo scaffold + CLI skeleton | `phase/0-baseline` | **done** |
-| 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `phase/1-config` | in progress |
-| 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | pending |
+| 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `phase/1-config` | **done** |
+| 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | **done** |
 | 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | pending |
 | 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | pending |
 | 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | pending |
@@ -86,6 +86,10 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
 | 2026-09-24 | smoke (temp `JAA_HOME`): `setup --provider openai --key … -y`, `echo | key set anthropic`, `key list`, `config set/get/list`, `doctor`, `key remove` | ok — masked `****<last4>`, config.json contains no secret, `.env` created, piped key accepted |
 | 2026-09-24 | real `~/.jaa` scan | ok — only dirs + default config.json; no `.env`, no secrets |
+| 2026-09-24 | `npm i openai @anthropic-ai/sdk @google/genai ollama` | ok — resolved: openai ^7.23.0, @anthropic-ai/sdk ^0.128.0, @google/genai ^2.24.0, ollama ^0.6.3 (install scripts blocked non-fatally) |
+| 2026-09-24 | `npm run lint` (Phase 2 first pass) | errors fixed in new code: exactOptionalPropertyTypes on mapped request fields, `openai` v7 types moved to `openai/resources/chat/completions/completions` (not root), Anthropic `InputSchema` requires literal `type:"object"` → neutral `ToolDef.inputSchema` tightened, Gemini `Schema`/ollama `Tool` boundary casts, union narrowing in tests |
+| 2026-09-24 | `npm test` | ok — 29/29 passed (13 new provider tests) |
+| 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
 
 > Final Phase 0 gate output gets pasted here before the phase commit.
 
@@ -116,7 +120,17 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] bootstrap `~/.jaa` on first command (creates dir tree + defaults `config.json`)
 - [x] `doctor` gained a `providers` check (names + source, never values)
 - [ ] tests → done (12: env precedence, keyring round-trip/masking, settings validation, setup)
-- [ ] gate (partial): lint ok, test 16/16, build ok, smoke ok; `npm audit` re-run + phase commit on `phase/1-config` still to do
+- [ ] phase commit on `phase/1-config` → **done** (gate: lint ok, test 20/20, build ok, smoke ok, `npm audit` 0)
+
+### Phase 2 — provider adapters + router *(done)*
+- [x] `src/providers/types.ts`: neutral `Role`/`ChatMessage`/`ToolCall`/`ToolDef`/`ChatRequest`/`Usage`/`ChatResponse`/`ChatStreamChunk`/`ProviderAdapter`/`ResolvedModel`; `ToolDef.inputSchema` typed as object-root JSON Schema (satisfies Anthropic `InputSchema`)
+- [x] `src/providers/openaiCompatible.ts`: factory for the whole OpenAI-compatible family (OpenAI, Groq, DeepSeek, Mistral, Together, xAI, Azure, local vLLM/LM Studio) — SDK v7 types imported from `openai/resources/chat/completions/completions`; `chat()` + `stream()`; pure `mapMessagesToWire`/`mapWireToolCalls`/`toolToWire`
+- [x] `src/providers/anthropic.ts`: SDK adapter, `system` param collapse, tool_result blocks, `mapToolCalls`, `DEFAULT_MAX_TOKENS = 2048`, injectable `fetch` for tests
+- [x] `src/providers/gemini.ts`: SDK adapter (`GoogleGenAI`), systemInstruction + functionCall/functionResponse parts, `Schema` boundary cast, usage from usageMetadata
+- [x] `src/providers/ollama.ts`: local-first adapter (no key), `options.temperature`/`num_predict`, tool_calls as parsed objects
+- [x] `src/providers/router.ts`: `resolveProviderKey` (env layers then keyring, never logs value), `resolveAdapter` (localOnly → ollama; helpful setup hint when keyless), `chat()`, `resolveModel()`, `defaultModelFor()` per provider
+- [x] tests → done (13: wire mappers for all 4 families, fake-fetch round-trips openai+anthropic, router resolution incl. keyless ollama + hint + settings default)
+- [x] phase gate: lint ok, test 29/29, build ok → commit on `phase/2-providers`
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
