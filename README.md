@@ -15,8 +15,8 @@ measurable bar (`jaa eval`) so "better" is tested, not claimed.
 
 ## Status
 
-Under construction — see `plan.md` for the phase tracker. Phase 0 (repo + CLI
-skeleton) is the current checkpoint.
+Under construction — see `plan.md` for the phase tracker. Phase 5 (Ink TUI) has a
+passing test harness and is in active development.
 
 ## Node
 

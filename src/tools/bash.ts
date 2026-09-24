@@ -16,7 +16,7 @@ const bashSchema = z.object({
 async function bashTool(args: unknown, ctx: ToolContext): Promise<string> {
   const { command, timeoutMs } = bashSchema.parse(args);
   if (!ctx.allowBash) {
-    return `shell disabled — run with --ask bash (or --approve) to allow commands. Not executed: ${command}`;
+    return `shell disabled — the operator did not allow shell access (rerun without --no-bash). Not executed: ${command}`;
   }
 
   const result = await runProcess(
@@ -37,7 +37,7 @@ export const bashTools: ToolDefinition[] = [
   {
     name: "bash",
     description:
-      "Run a shell command in the workspace. Always blocked unless the operator approved shell use.",
+      "Run a shell command in the workspace. Gated: reports \"shell disabled\" when the operator ran with --no-bash.",
     inputSchema: {
       type: "object",
       properties: {

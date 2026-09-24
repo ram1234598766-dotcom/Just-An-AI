@@ -13,8 +13,10 @@ import { readStdinIfPiped } from "../utils/cli.js";
 import { DEFAULT_SYSTEM_PROMPT, runAgentLoop } from "../agent/loop.js";
 import { appendMessages, createSession, listSessions, loadSession, removeSession, saveSession } from "../agent/session.js";
 import { resolveModel } from "../providers/router.js";
+import type { ToolCall } from "../providers/types.js";
 import { createDefaultRegistry } from "../tools/index.js";
 import type { ToolContext } from "../tools/types.js";
+import { toJsonAskResult } from "./json.js";
 
 const pkg = getPkgInfo();
 
@@ -159,7 +161,8 @@ program
 program
   .command("ask")
   .description("run one agent loop turn (chat, and tools when configured) and print the reply")
-  .argument("<prompt>", "what to ask the agent")
+  .argument("[prompt]", "what to ask the agent (or pass it with --prompt)")
+  .option("-p, --prompt <prompt>", "what to ask the agent (alternative to the positional argument)")
   .option("--provider <id>", "provider id (defaults to settings defaultProvider, then ollama)")
   .option("--model <model>", "model id (defaults to the provider's fast model)")
   .option("--system <prompt>", "system prompt override (defaults to the built-in agent prompt)")
@@ -169,9 +172,11 @@ program
   .option("--ctx <n>", "context window in tokens (ollama num_ctx)", parsePositiveInt)
   .option("--resume <id>", "continue an existing session")
   .option("--save", "persist the conversation to a new session")
+  .option("--json", "emit machine-readable JSON to stdout instead of prose")
   .option("--no-tools", "run without tool access (plain chat only)")
   .option("--no-bash", "advertise tools but keep the bash shell gated")
-  .action(async (prompt: string, opts: {
+  .action(async (prompt: string | undefined, opts: {
+    prompt?: string;
     provider?: string;
     model?: string;
     system?: string;
@@ -181,9 +186,12 @@ program
     ctx?: number;
     resume?: string;
     save?: boolean;
+    json?: boolean;
     tools?: boolean;
     bash?: boolean;
   }) => {
+    const promptText = prompt ?? opts.prompt;
+    if (!promptText) throw new Error("provide a prompt: the positional argument or --prompt <text>");
     const resumed = opts.resume ? loadSession(opts.resume) : undefined;
     if (opts.resume && !resumed) throw new Error(`session "${opts.resume}" not found`);
 
@@ -197,7 +205,7 @@ program
     if (messages.length === 0) {
       messages.push({ role: "system", content: opts.system ?? DEFAULT_SYSTEM_PROMPT });
     }
-    messages.push({ role: "user", content: prompt });
+    messages.push({ role: "user", content: promptText });
 
     const session =
       resumed ??
@@ -224,18 +232,24 @@ program
     const result = await runAgentLoop(loopOptions);
 
     const delta = result.messages.slice(resumed ? resumed.messages.length : messages.length);
-    for (const msg of delta) {
-      if (msg.role === "assistant" && msg.content) console.log(msg.content);
-    }
-
-    if (resumed || opts.save) {
+    const persisted = resumed || opts.save;
+    if (persisted) {
       appendMessages(session, ...delta);
       saveSession(session);
     }
 
+    if (opts.json) {
+      console.log(JSON.stringify({ ...toJsonAskResult(result, delta, model.provider, model.model), ...(persisted ? { sessionId: session.id } : {}) }));
+      return;
+    }
+
+    for (const msg of delta) {
+      if (msg.role === "assistant" && msg.content) console.log(msg.content);
+    }
+
     console.error(
       `[${result.stopReason}] ${result.turns} turn(s) · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out` +
-        (resumed || opts.save ? ` · session ${session.id}` : ""),
+        (persisted ? ` · session ${session.id}` : ""),
     );
   });
 
@@ -291,6 +305,90 @@ session
     const removed = removeSession(id);
     if (!removed) throw new Error(`session "${id}" not found`);
     console.log(`removed session ${id}`);
+  });
+
+// --- chat ---------------------------------------------------------------
+program
+  .command("chat")
+  .description("interactive terminal chat (Ink TUI); one argument-free session")
+  .option("--provider <id>", "provider id (defaults to settings defaultProvider, then ollama)")
+  .option("--model <model>", "model id (defaults to the provider's fast model)")
+  .option("--system <prompt>", "system prompt override (defaults to the built-in agent prompt)")
+  .option("--max-turns <n>", "cap the agent loop at n turns", parsePositiveInt)
+  .option("--token-budget <n>", "context budget in estimated tokens", parsePositiveInt)
+  .option("--temperature <n>", "sampling temperature", parseFloat)
+  .option("--ctx <n>", "context window in tokens (ollama num_ctx)", parsePositiveInt)
+  .option("--resume <id>", "continue an existing session")
+  .option("--save", "persist the conversation to a new session as you go")
+  .option("--no-tools", "run without tool access (plain chat only)")
+  .option("--no-bash", "advertise tools but keep the bash shell gated")
+  .action(async (opts: {
+    provider?: string;
+    model?: string;
+    system?: string;
+    maxTurns?: number;
+    tokenBudget?: number;
+    temperature?: number;
+    ctx?: number;
+    resume?: string;
+    save?: boolean;
+    tools?: boolean;
+    bash?: boolean;
+  }) => {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new Error("`jaa chat` needs an interactive terminal — use `jaa ask <prompt>` for one-shot output");
+    }
+
+    const resumed = opts.resume ? loadSession(opts.resume) : undefined;
+    if (opts.resume && !resumed) throw new Error(`session "${opts.resume}" not found`);
+
+    const modelInput: { provider?: string; model?: string } = {};
+    if (opts.provider !== undefined) modelInput.provider = opts.provider;
+    else if (resumed?.provider) modelInput.provider = resumed.provider;
+    if (opts.model !== undefined) modelInput.model = opts.model;
+    else if (resumed?.model) modelInput.model = resumed.model;
+    const model = resolveModel(modelInput);
+
+    const toolsEnabled = opts.tools !== false;
+    const registry = createDefaultRegistry();
+    const toolContext: ToolContext = {
+      root: process.cwd(),
+      cwd: process.cwd(),
+      allowBash: toolsEnabled && opts.bash !== false,
+    };
+    const executeTool = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
+
+    const { startChat } = await import("../tui/app.js");
+    const resumeMessages = resumed?.messages ?? [];
+
+    const session =
+      resumed ??
+      (opts.save ? createSession({ provider: model.provider, model: model.model, messages: resumeMessages }) : undefined) ??
+      undefined;
+
+    await startChat({
+      model,
+      systemPrompt: opts.system ?? DEFAULT_SYSTEM_PROMPT,
+      ...(toolsEnabled ? { tools: registry.list() } : {}),
+      executeTool,
+      ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+      ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(opts.ctx !== undefined ? { numContext: opts.ctx } : {}),
+      resumeMessages,
+      ...(session ? { sessionId: session.id } : {}),
+      onTurnEnd: (result) => {
+        if (!session) return;
+        const delta = result.messages.slice(session.messages.length);
+        if (delta.length === 0) return;
+        appendMessages(session, ...delta);
+        saveSession(session);
+      },
+    });
+
+    if (session && session.messages.length > resumeMessages.length) {
+      console.error(`conversation saved to session ${session.id}`);
+    }
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

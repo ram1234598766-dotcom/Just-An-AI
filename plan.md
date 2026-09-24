@@ -16,7 +16,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | **done** |
 | 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | **done** |
 | 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | **done** |
-| 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | pending |
+| 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | **in progress** |
 | 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | pending |
 | 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | pending |
 | 8 | MCP client/server + LSP diagnostics (first cut) | `phase/8-mcp-lsp` | pending |
@@ -168,6 +168,41 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] CLI: `ask` wires the registry by default; `--no-tools` = plain chat; `--no-bash` = advertise but keep the shell gated (bash stays gated unless the operator opts in)
 - [x] tests → done (23: registry advertising/unknown-tool/bad-JSON/zod-path/error-recovery, fs round-trip/traversal-escape/absolute-escape/`..\`-escape/list/stat/glob, globToRegExp no-slash-crossing, patch unique/atomic/ambiguous, bash gate + run, web scheme guard, git not-a-repo)
 - [x] phase gate: lint ok, test 84/84, build ok, smoke partial initially (qwen2.5-coder:7b text-tools) → **ok after re-verify** on `llama3.2:3b` (native tool calls, live 2-turn round-trip; see verification record) → committed on `phase/4-tools` (`1390502`)
+
+### Phase 5 — Ink TUI + non-interactive mode *(in progress)*
+
+- [x] `src/tui/app.tsx`: `ChatApp` Ink component — typed-input prompt (`❯`), idle hint
+      (`type a message and press Enter · Ctrl+C to quit`), live transcript rendering
+      (`❯`/`→`/`↳`/`…` prefixes with status meta, colors by line kind), busy/cursor
+      states, error + retry state. Exported for `jaa chat` (Ink) and `startChat`.
+- [x] `src/tui/render.ts`: display helpers — `clip`/`summarize` (bounded single-line
+      collapse; `\r\n`/`\s+` normalized), `formatToolCall` (re-parsed JSON args),
+      `summarizeToolResult` (`(ok)`/`(failed)` meta), `linesFromMessages` for the
+      resumed-transcript view (mirrors the live transcript so the initial render and
+      the streaming view look identical).
+- [x] `src/agent/loop.ts` callbacks wired into the TUI: `onAssistantMessage` /
+      `onToolResult` drive live line rendering; cumulative `usage` + `stopReason`
+      (`completed` / `max_turns`) feed the footer status line.
+- [x] Bug fixes surfaced by the Ink test harness:
+      - **Duplicate tool-call line:** the TUI previously rendered `→ tool(...)` from
+        both `onAssistantMessage` (which already emits the call) and a redundant
+        `onToolCall` callback → printed twice. Removed the duplicate callback. The
+        loop still calls it; the TUI simply no longer double-prints.
+      - **Final status line hidden when idle:** the input row only rendered `status`
+        while `busy === true`, so the post-loop `completed · N turn(s) · X in / Y out`
+        footer (and the `error — … to retry` line) were invisible. The row now
+        renders `input || status` so the completion / error status is visible idle.
+- [x] tests → `tests/tui-app.test.tsx` (ink-testing-library, 3 tests): idle-hint echo;
+      full tool round-trip `→ bash({"command":"ls"})` → `↳ ls succeeded (ok)` →
+      final answer `done` → `completed · 2 turn(s) · 16 in / 7 out`; and loop-failure
+      surfacing (`loop failed:` + retry hint). **3/3 passing.**
+      NOTE — ink-testing-library v4 `Stdin` does NOT queue chunks: two synchronous
+      `stdin.write(...)` calls coalesce into one, so `parse-keypress` receives
+      `"text\r"` instead of a lone `\r` and the `\r → name:'return'` mapping never
+      fires. The tests therefore `await delay(...)` between the text write and the
+      `\r` write so each forms its own readable chunk. (In a real terminal this is
+      not needed; it's a testing-library PassThrough artifact.)
+- [ ] phase gate → pending (lint + full test + build)
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
