@@ -181,7 +181,9 @@ program
 
     const modelInput: { provider?: string; model?: string } = {};
     if (opts.provider !== undefined) modelInput.provider = opts.provider;
+    else if (resumed?.provider) modelInput.provider = resumed.provider;
     if (opts.model !== undefined) modelInput.model = opts.model;
+    else if (resumed?.model) modelInput.model = resumed.model;
     const model = resolveModel(modelInput);
     const messages = resumed ? [...resumed.messages] : [];
     if (messages.length === 0) {
@@ -202,12 +204,13 @@ program
     if (opts.temperature !== undefined) loopOptions.temperature = opts.temperature;
     const result = await runAgentLoop(loopOptions);
 
-    for (const msg of result.messages) {
+    const delta = result.messages.slice(resumed ? resumed.messages.length : messages.length);
+    for (const msg of delta) {
       if (msg.role === "assistant" && msg.content) console.log(msg.content);
     }
 
     if (resumed || opts.save) {
-      appendMessages(session, ...result.messages.slice(messages.length));
+      appendMessages(session, ...delta);
       saveSession(session);
     }
 
