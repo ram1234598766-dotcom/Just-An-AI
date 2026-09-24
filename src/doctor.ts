@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { hasKey } from "./config/keyring.js";
+import { providerStatuses } from "./config/providers.js";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -81,6 +83,21 @@ function tmpCheck(): DoctorCheck {
   }
 }
 
+function providersCheck(): DoctorCheck {
+  const statuses = providerStatuses((def) => hasKey(def));
+  const configured = statuses.filter((s) => s.configured);
+  const detail =
+    configured.length === 0
+      ? "none yet — run `jaa setup` to configure a provider"
+      : configured.map((s) => `${s.id}${s.localOnly ? " (local)" : s.source ? ` (${s.source})` : ""}`).join(", ");
+  return {
+    key: "providers",
+    status: configured.length > 0 ? "ok" : "info",
+    message: `${configured.length} provider(s) configured`,
+    detail,
+  };
+}
+
 /**
  * Runs environment diagnostics. All checks are synchronous; git probe uses
  * execFileSync under a try/catch so a missing git never throws.
@@ -92,6 +109,7 @@ export function runDoctor(): DoctorReport {
       platformCheck(),
       dataDirCheck(),
       gitCheck(),
+      providersCheck(),
       tmpCheck(),
     ],
   };

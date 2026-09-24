@@ -47,6 +47,13 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
   to GitHub with his own credentials.
 - **2026-09-24 — VantaOS** (`C:\Users\Mrityunjay\Website`) is out of scope and
   must remain untouched.
+- **2026-09-24 — Keyring format:** `~/.jaa/.env` stores exactly one line per
+  provider, `JAA_<PROVIDER>_API_KEY=value`. Raw line reader (not dotenv) so
+  secret values survive stray `#`/`$`. Masked everywhere it is displayed.
+  Local-only providers (ollama) never need a key.
+- **2026-09-24 — Piped secrets:** `echo $KEY | jaa key set openai` reads stdin
+  when it isn't a TTY; `jaa key set <provider> <key>` on a TTY is fine too.
+  Secret never appears in command output (`****<last4>` only).
 
 ## Security log
 
@@ -73,6 +80,12 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `node dist/cli/index.js doctor` | ok — node ok, git ok, tmp ok, platform info, data-dir info |
 | 2026-09-24 | `npm audit --audit-level=high` | ok — 0 vulnerabilities |
 | 2026-09-24 | `git commit` on `phase/0-baseline` | ok — root commit `b001053`, 62 files |
+| 2026-09-24 | `npm i zod dotenv` | ok — added to deps |
+| 2026-09-24 | `npm run lint` (Phase 1 first pass) | ok — 4 errors (all new code) fixed: exactOptionalPropertyTypes on `SetupOptions`, unused param-properties on `EnvLayers`, `ProcessEnv` vs `Record<string,string>` |
+| 2026-09-24 | `CI=1 npm test` | ok — 16/16 passed (12 new config tests + 4 cli) |
+| 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
+| 2026-09-24 | smoke (temp `JAA_HOME`): `setup --provider openai --key … -y`, `echo | key set anthropic`, `key list`, `config set/get/list`, `doctor`, `key remove` | ok — masked `****<last4>`, config.json contains no secret, `.env` created, piped key accepted |
+| 2026-09-24 | real `~/.jaa` scan | ok — only dirs + default config.json; no `.env`, no secrets |
 
 > Final Phase 0 gate output gets pasted here before the phase commit.
 
@@ -94,13 +107,16 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] phase commit on `phase/0-baseline` → `b001053`
 
 ### Phase 1 — config + keyring *(next)*
-- [ ] `src/config/paths.ts`: `~/.jaa` layout (root, sessions, skills, cache, `.env`)
-- [ ] `src/config/env.ts`: precedence process env > project `.env` > `~/.jaa/.env`; `JAA_` namespace + provider-key mapping
-- [ ] `src/config/keyring.ts`: `jaa key set/list/remove`, masked output, mode-restricted file (0600 / Windows ACL best-effort)
-- [ ] `src/config/settings.ts`: typed settings (zod), `jaa config get/set`
-- [ ] `src/config/setup.ts`: interactive wizard (provider pick → paste key → persist) + `jaa setup --no-interactive`
-- [ ] bootstrap `~/.jaa` on first command
-- [ ] tests: precedence, masking, persist/read round-trip (temp dirs)
+- [x] `src/config/paths.ts`: `~/.jaa` layout (root, sessions, skills, cache, `.env`)
+- [x] `src/config/env.ts`: precedence process env > project `.env` > `~/.jaa/.env`; `EnvLayers` without mutating `process.env`, per-key `SecretRef.source`, `resetEnvLayers()` + `findSecret()`
+- [x] `src/config/providers.ts`: provider registry (openai, anthropic, google, groq, deepseek, mistral, together, xai, azure, ollama) → env var names + `JAA_<ID>_API_KEY`; `providerStatuses()` shared with doctor
+- [x] `src/config/keyring.ts`: `key set/list/remove`, masked output (`****<last4>`), raw line reader, mode 0600 on POSIX
+- [x] `src/config/settings.ts`: zod-typed settings (`defaultProvider`, `ollamaBaseUrl`, `models.*`), `config get/set/list` with dotted-path validation
+- [x] `src/config/setup.ts`: interactive wizard (provider pick → paste key) + `--provider --key -y` non-interactive + piped-stdin key
+- [x] bootstrap `~/.jaa` on first command (creates dir tree + defaults `config.json`)
+- [x] `doctor` gained a `providers` check (names + source, never values)
+- [ ] tests → done (12: env precedence, keyring round-trip/masking, settings validation, setup)
+- [ ] gate (partial): lint ok, test 16/16, build ok, smoke ok; `npm audit` re-run + phase commit on `phase/1-config` still to do
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
