@@ -1,0 +1,48 @@
+{
+  "name": "jaa-cli",
+  "version": "0.1.0",
+  "description": "J.A.A. - Just An AI: a local-first, multi-provider terminal coding agent. Bring your own key from any provider, or run fully local on Ollama.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Mrityunjay",
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "cli",
+    "terminal",
+    "llm",
+    "ollama",
+    "coding-assistant"
+  ],
+  "bin": {
+    "jaa": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "plan.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx src/cli/index.ts",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "pack:dryrun": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}

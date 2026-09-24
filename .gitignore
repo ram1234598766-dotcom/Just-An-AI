@@ -1,0 +1,28 @@
+# --- Node ---
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# --- Env & secrets (never commit keys) ---
+.env
+.env.*
+!.env.example
+
+# --- Logs & caches ---
+*.log
+logs/
+.vitest-cache/
+
+# --- JAA local state ---
+.jaa/
+*.db
+*.sqlite
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
