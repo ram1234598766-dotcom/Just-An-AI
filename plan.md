@@ -11,8 +11,8 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 
 | # | Phase | Branch | Status |
 |---|-------|--------|--------|
-| 0 | Repo scaffold + CLI skeleton | `phase/0-baseline` | **in progress** |
-| 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `phase/1-config` | pending |
+| 0 | Repo scaffold + CLI skeleton | `phase/0-baseline` | **done** |
+| 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `phase/1-config` | in progress |
 | 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | pending |
 | 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | pending |
 | 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | pending |
@@ -71,7 +71,8 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `npm run build` (`tsc -p tsconfig.build.json`) | ok |
 | 2026-09-24 | `node dist/cli/index.js --version` | ok — `0.1.0` |
 | 2026-09-24 | `node dist/cli/index.js doctor` | ok — node ok, git ok, tmp ok, platform info, data-dir info |
-| 2026-09-24 | `npm audit --audit-level=high` | pending |
+| 2026-09-24 | `npm audit --audit-level=high` | ok — 0 vulnerabilities |
+| 2026-09-24 | `git commit` on `phase/0-baseline` | ok — root commit `b001053`, 62 files |
 
 > Final Phase 0 gate output gets pasted here before the phase commit.
 
@@ -89,8 +90,17 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] tests for cli/doctor (4 tests)
 - [x] gate run: lint, test, build, smoke `node dist/cli/index.js --version` → **0.1.0**, `doctor` → all green
 - [x] fixed: `--version` read `0.0.0` (dist layout differs per directory depth) → bounded walk-up to package root in `src/version.ts`
-- [ ] `npm audit` at high
-- [ ] phase commit on `phase/0-baseline`
+- [x] `npm audit` at high → 0 vulnerabilities
+- [x] phase commit on `phase/0-baseline` → `b001053`
+
+### Phase 1 — config + keyring *(next)*
+- [ ] `src/config/paths.ts`: `~/.jaa` layout (root, sessions, skills, cache, `.env`)
+- [ ] `src/config/env.ts`: precedence process env > project `.env` > `~/.jaa/.env`; `JAA_` namespace + provider-key mapping
+- [ ] `src/config/keyring.ts`: `jaa key set/list/remove`, masked output, mode-restricted file (0600 / Windows ACL best-effort)
+- [ ] `src/config/settings.ts`: typed settings (zod), `jaa config get/set`
+- [ ] `src/config/setup.ts`: interactive wizard (provider pick → paste key → persist) + `jaa setup --no-interactive`
+- [ ] bootstrap `~/.jaa` on first command
+- [ ] tests: precedence, masking, persist/read round-trip (temp dirs)
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
