@@ -14,7 +14,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 0 | Repo scaffold + CLI skeleton | `phase/0-baseline` | **done** |
 | 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `phase/1-config` | **done** |
 | 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | **done** |
-| 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | pending |
+| 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | **done** |
 | 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | pending |
 | 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | pending |
 | 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | pending |
@@ -90,6 +90,11 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `npm run lint` (Phase 2 first pass) | errors fixed in new code: exactOptionalPropertyTypes on mapped request fields, `openai` v7 types moved to `openai/resources/chat/completions/completions` (not root), Anthropic `InputSchema` requires literal `type:"object"` → neutral `ToolDef.inputSchema` tightened, Gemini `Schema`/ollama `Tool` boundary casts, union narrowing in tests |
 | 2026-09-24 | `npm test` | ok — 29/29 passed (13 new provider tests) |
 | 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
+| 2026-09-24 | `npm run lint` (Phase 3 first pass) | errors fixed in new code: exactOptionalPropertyTypes on `ask` loop-options builder + `resolveModel` input, unused `ClientProviderAdapter`/`ChatMessage` imports in tests, test array needing an explicit `ChatMessage[]` annotation |
+| 2026-09-24 | `npm test` | ok — 61/61 passed (9 budget + 7 loop + 16 session tests) |
+| 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
+| 2026-09-24 | smoke: `session list`, `ask --help`, `ask --provider nope`, `ask --resume s-nope-0000` | ok — no-sessions hint, full help, clean unknown-provider + unknown-session errors |
+| 2026-09-24 | `node dist/cli/index.js ask "…" --save` | blocked at runtime — `fetch failed` (local Ollama not running); error surfaced cleanly, not a code failure |
 
 > Final Phase 0 gate output gets pasted here before the phase commit.
 
@@ -131,6 +136,14 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] `src/providers/router.ts`: `resolveProviderKey` (env layers then keyring, never logs value), `resolveAdapter` (localOnly → ollama; helpful setup hint when keyless), `chat()`, `resolveModel()`, `defaultModelFor()` per provider
 - [x] tests → done (13: wire mappers for all 4 families, fake-fetch round-trips openai+anthropic, router resolution incl. keyless ollama + hint + settings default)
 - [x] phase gate: lint ok, test 29/29, build ok → commit on `phase/2-providers`
+
+### Phase 3 — agent loop + context budgeting + sessions *(done)*
+- [x] `src/agent/budget.ts`: `estimateTokens` (chars/4, floor 1) + `estimateMessageTokens` (overhead + tool-call args) + `estimateChatTokens`; `trimToBudget` = chunk-based (system chunks always kept; newest non-system chunk kept even when it alone overflows; assistant-tool_calls chunk never split from its tool results; `Infinity` budget = no trim). `DEFAULT_TOKEN_BUDGET = 32_000`
+- [x] `src/agent/loop.ts`: `runAgentLoop` — per-request `trimToBudget` against the provider context budget, returns the full untrimmed transcript; `executeTool` (injected; Phase 4 registers real tools), executor throws fed back as tool results (loop never crashes); stops on `completed` (no tool calls) / `max_turns` (`DEFAULT_MAX_TURNS = 20`); cumulative usage; render callbacks `onAssistantMessage`/`onToolCall`/`onToolResult` for the Phase 5 TUI
+- [x] `src/agent/session.ts`: one JSON file per session under `~/.jaa/sessions/`; zod-validated on every read (disk = hostile); id `s-<base36 ts>-<hex>` guarded by `/^s-[A-Za-z0-9_-]{4,63}$/` (path traversal); title derived from first user message (≤60 chars, ellipsis); `createSession` seeds a system prompt only for brand-new conversations; `saveSession` atomic (tmp + rename, mode 600 on POSIX); `loadSession` returns `undefined` for unknown ids and throws on corrupt; `listSessions` newest-first and skips corrupt files; `appendMessages` bumps `updatedAt`
+- [x] CLI: `jaa ask <prompt>` (options: provider/model/system/max-turns/token-budget/temperature/resume/save) prints assistant replies, persists deltas on `--resume`/`--save`; `jaa session list|show|remove`
+- [x] tests → done (32: budget trimming invariants incl. tool-call pairing, scripted-adapter loop round-trips incl. tool feed-back + executor-throw recovery + max_turns + per-request trimming + callbacks, session round-trip/corrupt/id-guard/list-sort/title)
+- [x] phase gate: lint ok, test 61/61, build ok, smoke ok → commit on `phase/3-loop`
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or

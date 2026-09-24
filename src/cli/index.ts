@@ -10,8 +10,17 @@ import { providerById, PROVIDERS } from "../config/providers.js";
 import { envLayers } from "../config/env.js";
 import { runSetup } from "../config/setup.js";
 import { readStdinIfPiped } from "../utils/cli.js";
+import { DEFAULT_SYSTEM_PROMPT, runAgentLoop } from "../agent/loop.js";
+import { appendMessages, createSession, listSessions, loadSession, removeSession, saveSession } from "../agent/session.js";
+import { resolveModel } from "../providers/router.js";
 
 const pkg = getPkgInfo();
+
+function parsePositiveInt(value: string): number {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`expected a positive integer, got "${value}"`);
+  return n;
+}
 
 function bootstrap(): void {
   const paths = ensureJaaHome();
@@ -142,6 +151,124 @@ program
       `default provider: ${result.defaultProviderSet ? result.provider : "unchanged"}`,
     ];
     console.log(lines.join("\n"));
+  });
+
+// --- ask ----------------------------------------------------------------
+program
+  .command("ask")
+  .description("run one agent loop turn (chat, and tools when configured) and print the reply")
+  .argument("<prompt>", "what to ask the agent")
+  .option("--provider <id>", "provider id (defaults to settings defaultProvider, then ollama)")
+  .option("--model <model>", "model id (defaults to the provider's fast model)")
+  .option("--system <prompt>", "system prompt override (defaults to the built-in agent prompt)")
+  .option("--max-turns <n>", "cap the agent loop at n turns", parsePositiveInt)
+  .option("--token-budget <n>", "context budget in estimated tokens", parsePositiveInt)
+  .option("--temperature <n>", "sampling temperature", parseFloat)
+  .option("--resume <id>", "continue an existing session")
+  .option("--save", "persist the conversation to a new session")
+  .action(async (prompt: string, opts: {
+    provider?: string;
+    model?: string;
+    system?: string;
+    maxTurns?: number;
+    tokenBudget?: number;
+    temperature?: number;
+    resume?: string;
+    save?: boolean;
+  }) => {
+    const resumed = opts.resume ? loadSession(opts.resume) : undefined;
+    if (opts.resume && !resumed) throw new Error(`session "${opts.resume}" not found`);
+
+    const modelInput: { provider?: string; model?: string } = {};
+    if (opts.provider !== undefined) modelInput.provider = opts.provider;
+    if (opts.model !== undefined) modelInput.model = opts.model;
+    const model = resolveModel(modelInput);
+    const messages = resumed ? [...resumed.messages] : [];
+    if (messages.length === 0) {
+      messages.push({ role: "system", content: opts.system ?? DEFAULT_SYSTEM_PROMPT });
+    }
+    messages.push({ role: "user", content: prompt });
+
+    const session =
+      resumed ??
+      createSession({ provider: model.provider, model: model.model, messages: [...messages] });
+    const loopOptions: Parameters<typeof runAgentLoop>[0] = {
+      model,
+      messages,
+      executeTool: async (call) => `tool "${call.name}" is not available in this build yet`,
+    };
+    if (opts.maxTurns !== undefined) loopOptions.maxTurns = opts.maxTurns;
+    if (opts.tokenBudget !== undefined) loopOptions.tokenBudget = opts.tokenBudget;
+    if (opts.temperature !== undefined) loopOptions.temperature = opts.temperature;
+    const result = await runAgentLoop(loopOptions);
+
+    for (const msg of result.messages) {
+      if (msg.role === "assistant" && msg.content) console.log(msg.content);
+    }
+
+    if (resumed || opts.save) {
+      appendMessages(session, ...result.messages.slice(messages.length));
+      saveSession(session);
+    }
+
+    console.error(
+      `[${result.stopReason}] ${result.turns} turn(s) · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out` +
+        (resumed || opts.save ? ` · session ${session.id}` : ""),
+    );
+  });
+
+// --- session ------------------------------------------------------------
+const session = program
+  .command("session")
+  .description("manage persisted agent sessions (~/.jaa/sessions)");
+
+session
+  .command("list")
+  .description("list saved sessions, newest first")
+  .action(() => {
+    const metas = listSessions();
+    if (metas.length === 0) {
+      console.log("no sessions yet — run `jaa ask <prompt> --save`");
+      return;
+    }
+    for (const meta of metas) {
+      const line = [
+        meta.id,
+        meta.updatedAt.slice(0, 19).replace("T", " "),
+        `${meta.messageCount} msg`,
+        meta.model ? `${meta.provider}/${meta.model}` : meta.provider ?? "",
+        meta.title ?? "",
+      ]
+        .filter(Boolean)
+        .join("  ");
+      console.log(line);
+    }
+  });
+
+session
+  .command("show")
+  .description("print a session's full transcript")
+  .argument("<id>", "session id")
+  .action((id: string) => {
+    const found = loadSession(id);
+    if (!found) throw new Error(`session "${id}" not found`);
+    for (const msg of found.messages) {
+      const tag = msg.role;
+      console.log(`[${tag}] ${msg.content}`);
+      for (const call of msg.toolCalls ?? []) {
+        console.log(`[tool-call] ${call.name}(${call.arguments})`);
+      }
+    }
+  });
+
+session
+  .command("remove")
+  .description("delete a saved session")
+  .argument("<id>", "session id")
+  .action((id: string) => {
+    const removed = removeSession(id);
+    if (!removed) throw new Error(`session "${id}" not found`);
+    console.log(`removed session ${id}`);
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
