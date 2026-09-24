@@ -13,6 +13,8 @@ import { readStdinIfPiped } from "../utils/cli.js";
 import { DEFAULT_SYSTEM_PROMPT, runAgentLoop } from "../agent/loop.js";
 import { appendMessages, createSession, listSessions, loadSession, removeSession, saveSession } from "../agent/session.js";
 import { resolveModel } from "../providers/router.js";
+import { createDefaultRegistry } from "../tools/index.js";
+import type { ToolContext } from "../tools/types.js";
 
 const pkg = getPkgInfo();
 
@@ -166,6 +168,8 @@ program
   .option("--temperature <n>", "sampling temperature", parseFloat)
   .option("--resume <id>", "continue an existing session")
   .option("--save", "persist the conversation to a new session")
+  .option("--no-tools", "run without tool access (plain chat only)")
+  .option("--no-bash", "advertise tools but keep the bash shell gated")
   .action(async (prompt: string, opts: {
     provider?: string;
     model?: string;
@@ -175,6 +179,8 @@ program
     temperature?: number;
     resume?: string;
     save?: boolean;
+    tools?: boolean;
+    bash?: boolean;
   }) => {
     const resumed = opts.resume ? loadSession(opts.resume) : undefined;
     if (opts.resume && !resumed) throw new Error(`session "${opts.resume}" not found`);
@@ -194,11 +200,21 @@ program
     const session =
       resumed ??
       createSession({ provider: model.provider, model: model.model, messages: [...messages] });
+
+    const toolsEnabled = opts.tools !== false;
+    const registry = createDefaultRegistry();
+    const toolContext: ToolContext = {
+      root: process.cwd(),
+      cwd: process.cwd(),
+      allowBash: toolsEnabled && opts.bash !== false,
+    };
+
     const loopOptions: Parameters<typeof runAgentLoop>[0] = {
       model,
       messages,
-      executeTool: async (call) => `tool "${call.name}" is not available in this build yet`,
+      executeTool: (call) => registry.execute(call.name, call.arguments, toolContext),
     };
+    if (toolsEnabled) loopOptions.tools = registry.list();
     if (opts.maxTurns !== undefined) loopOptions.maxTurns = opts.maxTurns;
     if (opts.tokenBudget !== undefined) loopOptions.tokenBudget = opts.tokenBudget;
     if (opts.temperature !== undefined) loopOptions.temperature = opts.temperature;

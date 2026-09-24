@@ -15,7 +15,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `phase/1-config` | **done** |
 | 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | **done** |
 | 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | **done** |
-| 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | pending |
+| 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | **done** |
 | 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | pending |
 | 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | pending |
 | 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | pending |
@@ -95,6 +95,13 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
 | 2026-09-24 | smoke: `session list`, `ask --help`, `ask --provider nope`, `ask --resume s-nope-0000` | ok — no-sessions hint, full help, clean unknown-provider + unknown-session errors |
 | 2026-09-24 | `node dist/cli/index.js ask "…" --save` | blocked at runtime — `fetch failed` (local Ollama not running); error surfaced cleanly, not a code failure |
+| 2026-09-24 | live Ollama ask (Phase 3): `ask "Reply with exactly the word OK." --provider ollama --model qwen2.5-coder:7b --save --max-turns 1` | ok — `OK`, session created; `session list`/`show` verified `[system][user][assistant]` |
+| 2026-09-24 | resume reuse of session provider/model + delta persistence (fresh session `s-mufqr9yg-12717f8a`) | ok — resumed session reuses stored provider/model; new `[user]` message persisted; delta printing doesn't replay history |
+| 2026-09-24 | `npm run lint` (Phase 4 first pass) | 3 errors fixed in new code: `exactOptionalPropertyTypes` on `tools` in loop-options builder, `execFile` stdout typed `string \| Buffer` at the boundary, non-existent `toStartWith` matcher → `toMatch` |
+| 2026-09-24 | `npm test` | ok — 84/84 passed (23 new tool tests: registry, fs, globToRegExp, patch, bash gate, web scheme, git not-a-repo) |
+| 2026-09-24 | `npm run build` | ok (tsconfig.build.json) |
+| 2026-09-24 | direct registry smoke (temp-ws): `write_file` round-trip + `list_dir` | ok — 12 tools advertised (`read_file,write_file,list_dir,stat,glob,patch,bash,fetch_url,git_status,git_log,git_diff,git_show`); wrote 6 bytes to note.txt |
+| 2026-09-24 | live Ollama tool round-trip (`qwen2.5-coder:7b`, `--max-turns 4`) | **partial** — loop executed 0 tool turns because this qwen2.5-coder build returns tool calls as *text* (`{"name":"write_file",...}` in `content`), not native `tool_calls`. Verified directly against Ollama 0.34.2 `/api/chat`. Registry + loop tool wiring covered by unit tests instead |
 
 > Final Phase 0 gate output gets pasted here before the phase commit.
 
@@ -144,6 +151,18 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] CLI: `jaa ask <prompt>` (options: provider/model/system/max-turns/token-budget/temperature/resume/save) prints assistant replies, persists deltas on `--resume`/`--save`; `jaa session list|show|remove`
 - [x] tests → done (32: budget trimming invariants incl. tool-call pairing, scripted-adapter loop round-trips incl. tool feed-back + executor-throw recovery + max_turns + per-request trimming + callbacks, session round-trip/corrupt/id-guard/list-sort/title)
 - [x] phase gate: lint ok, test 61/61, build ok, smoke ok → commit on `phase/3-loop`
+
+### Phase 4 — tools *(done)*
+- [x] `src/tools/types.ts`: `ToolContext` (`root`/`cwd`/`allowBash`) + `ToolDefinition` (`name`, `description`, `inputSchema` JSON Schema, zod `schema`, `run(input, ctx)`) — context injected per execution, registry stays context-free
+- [x] `src/tools/registry.ts`: `createRegistry(tools)` — `list()` → neutral `ToolDef[]` for advertising, `execute(name, argsJson, ctx)` (JSON-arg parse, zod validation with path-qualified issue report, unknown-tool + handler errors returned as strings so the loop never crashes); `confinePath` blocks absolute-path and `..` traversal outside `root` (null-byte guard); `runProcess` (execFile, no shell, timeout, maxBuffer) shared by bash/git; `clampOutput` → 80 KB per tool result
+- [x] `src/tools/fs.ts`: `read_file` (binary sniff, truncated at cap), `write_file`, `list_dir`, `stat`, `glob` (`*`/`?`/`**`, workspace-only via `globToRegExp`, 500-entry cap)
+- [x] `src/tools/patch.ts`: `patch` — exact-anchor hunks (`oldText`→`newText`), each must match exactly once (ambiguity rejected), applied in order, **atomic** (no partial writes); ≤20 hunks
+- [x] `src/tools/bash.ts`: `bash` behind the ask-gate — refuses when `ctx.allowBash` is false (tells the model the gate), otherwise `runProcess` via `sh -c`/`cmd /d /s /c`, default 30 s timeout (cap 120 s), exit-code trailer
+- [x] `src/tools/web.ts`: `fetch_url` — http(s)-only, `AbortSignal.timeout`, redirects followed, body capped at share cap; `src/tools/git.ts`: read-only `git_status`/`git_log`/`git_diff`/`git_show` all run `git -C <root>` (can't touch anything outside the workspace)
+- [x] `src/tools/index.ts`: `defaultToolDefinitions()` (fs + patch + bash + web + git) + `createDefaultRegistry()`
+- [x] CLI: `ask` wires the registry by default; `--no-tools` = plain chat; `--no-bash` = advertise but keep the shell gated (bash stays gated unless the operator opts in)
+- [x] tests → done (23: registry advertising/unknown-tool/bad-JSON/zod-path/error-recovery, fs round-trip/traversal-escape/absolute-escape/`..\`-escape/list/stat/glob, globToRegExp no-slash-crossing, patch unique/atomic/ambiguous, bash gate + run, web scheme guard, git not-a-repo)
+- [x] phase gate: lint ok, test 84/84, build ok, smoke partial (see verification record — qwen2.5-coder:7b returns tool calls as text, not native `tool_calls`) → commit on `phase/4-tools`
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
