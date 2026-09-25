@@ -1,4 +1,12 @@
-import { defaultRules, describeRule, isKnownTool, isReadOnlyTool, ruleMatches, ruleSpecificity } from "./rules.js";
+import {
+  defaultRules,
+  describeRule,
+  isKnownTool,
+  isReadOnlyTool,
+  NEVER_IMPLICITLY_ALLOWED,
+  ruleMatches,
+  ruleSpecificity,
+} from "./rules.js";
 import type { GateOptions, PermissionMode, PermissionOutcome, PermissionRequest, Rule } from "./types.js";
 
 export interface Engine {
@@ -78,26 +86,28 @@ function describeRequest(request: PermissionRequest): string {
  * An explicit `allow` or `deny` from any rule is final: modes only decide what
  * happens to an `ask`.
  *
- * Two hard rules, both fail-closed:
- * - `bash` is never implicitly allowed, in any mode. Shell access is the single
- *   highest-blast-radius capability in the toolset, so it always requires an
- *   explicit rule or an explicit operator decision. The comparison is
- *   case-insensitive because rule matching is, and `cmd.exe` builtins are too.
+ * Three hard rules, all fail-closed:
+ * - A tool in `NEVER_IMPLICITLY_ALLOWED` is never allowed by a mode. `bash` runs
+ *   an arbitrary agent-supplied command and `git_diff` can execute a
+ *   repository-local diff driver, so both need an explicit rule. An explicit
+ *   operator `allow` DOES win here, because `defaultRules` emits no competing
+ *   rule for them.
  * - A tool jaa does not itself register (anything an MCP server advertises) is
  *   never implicitly allowed either. It gets no mode baseline, because jaa
  *   cannot know what such a tool does, and `confinePath` does not protect it.
+ * - `tool` is required, not optional. An optional parameter would let a future
+ *   caller skip the checks above by omitting it.
  */
 export function resolveDecision(
   outcome: Pick<PermissionOutcome, "decision">,
   mode: PermissionMode,
   readOnly: boolean,
-  tool?: string,
+  tool: string,
 ): "allow" | "deny" | "ask" {
   if (outcome.decision === "allow") return "allow";
   if (outcome.decision === "deny") return "deny";
-  if (tool === undefined) return "ask";
   const name = tool.toLowerCase();
-  if (name === "bash") return "ask";
+  if (NEVER_IMPLICITLY_ALLOWED.includes(name)) return "ask";
   if (!isKnownTool(name)) return "ask";
   if (mode === "suggest") return "ask";
   if (readOnly) return "allow";

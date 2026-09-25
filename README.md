@@ -127,6 +127,69 @@ honouring it automatically would let the repository widen your permissions.
 validated independently, so a typo in `allow` can no longer silently void your
 `deny` list.
 
+**`bash` and `git_diff` need an explicit grant.** Neither mode implies them, in
+any mode, because both can execute code. You can still grant them durably:
+
+```jsonc
+{ "permissions": { "mode": "full-auto", "allow": ["bash", "git_diff"] } }
+```
+
+Without that rule, a non-interactive session refuses both rather than assuming
+consent.
+
+## Sandbox
+
+Path validation is not containment. `confinePath` stops a tool from *naming* a
+path outside the workspace; it cannot stop a process from opening one. Every
+command-executing tool therefore goes through `runProcess`, which wraps it in an
+OS sandbox when the host has one.
+
+| Platform | Mechanism | What it enforces |
+|----------|-----------|------------------|
+| macOS | Seatbelt (`sandbox-exec`) | filesystem read/write roots, network, process-exec |
+| Linux | bubblewrap | filesystem read/write roots, network, private PID namespace |
+| Windows | **none** | nothing -- see below |
+
+**Windows has no sandbox, and jaa refuses to pretend otherwise.** `sandbox-exec`
+and bubblewrap are POSIX-only, and Windows Job Objects need a native Node binding
+that would make `jaa` un-installable without a build toolchain. So on Windows:
+
+- `bash` **refuses to run** unless you pass `--no-sandbox`, which runs it
+  unisolated and says so in the output.
+- The `git` tools run unisolated. Their argv is hardened, but that is argv
+  hygiene, not a security boundary.
+- `jaa doctor` prints the reason, not a green tick.
+
+`--no-sandbox` and `--allow-network` are available on `ask`, `chat` and
+`agent run`, so the choice is always explicit and always yours:
+
+```bash
+jaa ask "run the tests"                      # refuses on Windows, sandboxed on macOS/Linux
+jaa ask "run the tests" --no-sandbox         # unisolated, and it tells you
+jaa ask "install the package" --allow-network  # sandboxed, but with network
+```
+
+**What the capability probe actually checks.** It does not test that
+`sandbox-exec` exists. It runs the *real generated profile* over a throwaway
+directory, because a probe with a hand-written stand-in argv passes on hosts
+where every genuine command then fails -- which is exactly what happened when a
+macOS-only bind source in the Linux system-root list made `doctor` report a
+working sandbox that could not run anything. The result is memoised per platform
+and the guarantees reported are only those verified.
+
+**What a sandboxed command does not inherit.** The environment is cleared and
+rebuilt from an explicit passthrough list, so provider API keys in your shell are
+not visible to the command. `NODE_OPTIONS` is always unset, since it would
+otherwise inject `--require` into a child `node`. On Linux the PID namespace
+means the command cannot signal same-uid host processes.
+
+**Known limits.** Linux passthrough *values* appear in the child `bwrap` argv,
+so another process of the same user can read them from a process listing; a
+different transport would be needed to fix that. The macOS system-read list has
+not been validated on real hardware. Landlock/seccomp are not implemented --
+bubblewrap provides the same guarantees without a compiled helper, and asking for
+`landlock` is refused rather than quietly downgraded.
+
 ## Quickstart
 
 ```bash
@@ -145,10 +208,10 @@ Precedence: process env > project `.env` > `~/.jaa/.env`. Local providers
 
 | Command | Purpose |
 |---------|---------|
-| `jaa ask "<prompt>"` | One-shot agent run (optionally `--save`, `--resume`, `--provider`, `--model`, `--max-turns`, `--token-budget`, `--temperature`, `--ctx`, `--no-tools`, `--no-bash`, `--no-skills`) |
-| `jaa chat` | Interactive Ink TUI |
+| `jaa ask "<prompt>"` | One-shot agent run (optionally `--save`, `--resume`, `--provider`, `--model`, `--max-turns`, `--token-budget`, `--temperature`, `--ctx`, `--no-tools`, `--no-bash`, `--no-skills`, `--no-sandbox`, `--allow-network`) |
+| `jaa chat` | Interactive Ink TUI (also accepts `--no-sandbox`, `--allow-network`) |
 | `jaa session list|show|remove` | Conversation history |
-| `jaa agent list|show|run <name> [task]` | Subagents defined in `AGENTS.md` |
+| `jaa agent list|show|run <name> [task]` | Subagents defined in `AGENTS.md` (`run` also accepts `--allow-bash`, `--no-sandbox`, `--allow-network`, `--permission-mode`) |
 | `jaa skill list|install|remove` | `SKILL.md` skills with autotrigger |
 | `jaa key set|list|remove <provider>` | Keyring (output masked as `****<last4>`) |
 | `jaa config get|set|list <path>` | Settings |
@@ -162,9 +225,11 @@ Precedence: process env > project `.env` > `~/.jaa/.env`. Local providers
 
 ## Tools
 
-Sandboxed, workspace-confined. All paths are checked against the workspace
-root by `confinePath` (absolute paths and `..` traversal blocked, null-byte
-guard). Output is clamped to 80 KB per tool result.
+Path-confined and, where the host allows it, OS-sandboxed. All paths are checked
+against the workspace root by `confinePath` (absolute paths and `..` traversal
+blocked, null-byte guard). Output is clamped to 80 KB per tool result. See
+[Sandbox](#sandbox) for containment, which is a separate and stronger guarantee
+than path validation.
 
 | Tool | Description |
 |------|-------------|
@@ -176,7 +241,17 @@ guard). Output is clamped to 80 KB per tool result.
 | `patch` | Exact-anchor hunks, applied atomically (<=20 hunks) |
 | `bash` | Gated behind `allowBash`; `sh -c`/`cmd /d /s /c`, 30s default (cap 120s), no shell injection via `execFile` |
 | `fetch_url` | http(s) only, redirect-following, body capped |
-| `git_status`/`git_log`/`git_diff`/`git_show` | Read-only, run as `git -C <root>` |
+| `git_status`/`git_log`/`git_diff`/`git_show` | Read-only file access; argv hardened, see below |
+
+`git_diff` is **not** treated as read-only by the permission engine, because
+`git diff` executes a `[diff "<driver>"] command` selected by a
+`.gitattributes` line, and both files are agent-writable. A `write_file` into
+`.git/config` or `.gitattributes` is therefore code execution unless git is
+hardened. jaa neutralises the known routes -- `-c core.fsmonitor=false` and
+`core.hooksPath=`, plus `--no-ext-diff --no-textconv` on `diff`, `log` and
+`show` (`git status` takes no such options and would exit 128 with them) -- but
+because the residual risk is an unconsidered git config key, `git_diff` still
+requires an explicit permission like `bash` does.
 
 ## Providers
 

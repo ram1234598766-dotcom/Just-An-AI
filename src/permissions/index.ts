@@ -15,6 +15,7 @@ export {
   isPermissionMode,
   isReadOnlyTool,
   MUTATING_TOOLS,
+  NEVER_IMPLICITLY_ALLOWED,
   READ_ONLY_TOOLS,
   ruleMatches,
   ruleSpecificity,

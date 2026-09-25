@@ -8,12 +8,73 @@ import type { ToolContext, ToolDefinition } from "./types.js";
  */
 const GIT = "git";
 
+/**
+ * Top-level git hardening: `-c` config overrides, which must appear BEFORE the
+ * subcommand.
+ *
+ * `core.fsmonitor` matters as much as the rest: a repository-local
+ * `[core] fsmonitor = /path/to/program` is executed by `git status` and
+ * `git diff`, so without `-c core.fsmonitor=false` a `write_file` into
+ * `.git/config` is code execution even with `--no-ext-diff` in place. Verified
+ * on Linux with the exact argv below.
+ */
+const GIT_CONFIG = [
+  "-c",
+  "core.pager=cat",
+  "-c",
+  "core.hooksPath=",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "diff.external=",
+  "-c",
+  "credential.helper=",
+  "-c",
+  "protocol.ext.allow=never",
+];
+
+/**
+ * Subcommand-level hardening. These are options of the *diff-producing*
+ * subcommands only -- `git status` rejects them outright -- so they must be
+ * applied per subcommand and placed AFTER it.
+ *
+ * `--no-ext-diff --no-textconv` close the `[diff "<driver>"] command` vector
+ * selected by a `.gitattributes` `diff=<driver>` line. Both files are
+ * agent-writable. Verified locally: without these flags git invokes the
+ * repo-local driver.
+ */
+const DIFF_SUBCOMMAND_FLAGS = ["--no-ext-diff", "--no-textconv"];
+
 const gitLogSchema = z.object({ n: z.number().int().min(1).max(50).default(10) });
 const gitDiffSchema = z.object({ staged: z.boolean().default(false) });
 const gitShowSchema = z.object({ path: z.string().min(1) });
 
-async function runGit(ctx: ToolContext, args: string[], timeoutMs = 30_000): Promise<string> {
-  const result = await runProcess(GIT, ["-C", ctx.root, ...args], { cwd: ctx.root, timeoutMs });
+async function runGit(
+  ctx: ToolContext,
+  subcommand: string,
+  args: string[],
+  subcommandFlags: string[] = DIFF_SUBCOMMAND_FLAGS,
+  timeoutMs = 30_000,
+): Promise<string> {
+  const result = await runProcess(
+    GIT,
+    ["-C", ctx.root, ...GIT_CONFIG, subcommand, ...subcommandFlags, ...args],
+    {
+      cwd: ctx.root,
+      timeoutMs,
+      // The argv here is fixed and jaa-controlled, unlike `bash`, so a host with
+      // no OS sandbox still gets a usable (hardened) tool rather than a refusal.
+      // Residual risk is a hostile git config we have not thought of, which is
+      // why `git_diff` is not treated as read-only in the permission engine.
+      sandbox: {
+        writableRoots: [ctx.root],
+        readableRoots: [ctx.root],
+        network: false,
+        envPassthrough: ["PATH", "HOME", "USERPROFILE", "SystemRoot", "TEMP", "TMP"],
+        enforcement: "best-effort",
+      },
+    },
+  );
   const parts = [result.stdout, result.stderr].filter((s) => s.length > 0);
   const body = parts.join("\n");
   return `${body}${body.endsWith("\n") ? "" : "\n"}[exit ${String(result.code)}]`.trim();
@@ -21,21 +82,23 @@ async function runGit(ctx: ToolContext, args: string[], timeoutMs = 30_000): Pro
 
 async function logTool(args: unknown, ctx: ToolContext): Promise<string> {
   const { n } = gitLogSchema.parse(args);
-  return runGit(ctx, ["--no-pager", "log", "--oneline", `-n${n}`]);
+  return runGit(ctx, "log", ["--oneline", `-n${n}`]);
 }
 
 async function statusTool(_args: unknown, ctx: ToolContext): Promise<string> {
-  return runGit(ctx, ["--no-pager", "status", "--short"]);
+  // `git status` takes no diff options, so the subcommand flags must be omitted
+  // or it exits 128 with a usage error.
+  return runGit(ctx, "status", ["--short"], []);
 }
 
 async function diffTool(args: unknown, ctx: ToolContext): Promise<string> {
   const { staged } = gitDiffSchema.parse(args);
-  return runGit(ctx, ["--no-pager", "diff", ...(staged ? ["--cached"] : [])]);
+  return runGit(ctx, "diff", staged ? ["--cached"] : []);
 }
 
 async function showTool(args: unknown, ctx: ToolContext): Promise<string> {
   const { path } = gitShowSchema.parse(args);
-  return runGit(ctx, ["--no-pager", "show", `HEAD:${path}`]);
+  return runGit(ctx, "show", [`HEAD:${path}`]);
 }
 
 export const gitTools: ToolDefinition[] = [

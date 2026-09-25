@@ -16,9 +16,9 @@ describe("version", () => {
 });
 
 describe("doctor", () => {
-  it("returns a well-formed report with all checks", () => {
-    const report = runDoctor();
-    const keys = report.checks.map((c) => c.key);
+  it("returns a well-formed report with all checks", async () => {
+    const report = await runDoctor();
+    const keys = report.checks.map((c: { key: string }) => c.key);
     expect(keys).toContain("node-version");
     expect(keys).toContain("platform");
     expect(keys).toContain("data-dir");
@@ -30,13 +30,14 @@ describe("doctor", () => {
     }
   });
 
-  it("passes the node version check on the current runtime", () => {
-    const node = runDoctor().checks.find((c) => c.key === "node-version");
+  it("passes the node version check on the current runtime", async () => {
+    const report2 = await runDoctor();
+    const node = report2.checks.find((c: { key: string }) => c.key === "node-version");
     expect(node?.status).toBe("ok");
   });
 
-  it("renders a readable formatted report", () => {
-    const text = formatReport(runDoctor());
+  it("renders a readable formatted report", async () => {
+    const text = formatReport(await runDoctor());
     expect(text).toContain("node-version");
     expect(text).toMatch(/\[ok\]|\[warn\]|\[fail\]|\[info\]/);
   });

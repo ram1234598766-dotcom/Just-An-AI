@@ -631,35 +631,76 @@ where a shared `ToolContext` carries the resolved policy.
 Claude Code Seatbelt and bubblewrap; opencode Docker. jaa targets all three
 desktop platforms with no Docker requirement.
 
-- [ ] `src/sandbox/types.ts` - `SandboxPolicy` (writable roots, readable roots,
-      network, process spawn, env passthrough), platform capability probe
-- [ ] `src/sandbox/darwin.ts` - generate and exec a Seatbelt profile via
-      `sandbox-exec`; writable roots from the Phase 11 decision
-- [ ] `src/sandbox/linux.ts` - Landlock LSM rules plus a seccomp-bpf filter;
-      bubblewrap as the portable fallback when Landlock is unavailable
-- [ ] `src/sandbox/win32.ts` - Job Objects for process containment plus an ACL
-      guard on writable roots. Windows has no Seatbelt equivalent; be explicit
-      in docs about what is enforced versus advisory
-- [ ] `src/sandbox/detect.ts` - probe what the host actually supports, cache
-      the result, and surface it in `jaa doctor`
-- [ ] `src/sandbox/apply.ts` - wrap every `runProcess` call site; a tool that
-      cannot be sandboxed must declare so rather than silently run wide
-- [ ] `src/tools/bash.ts` and `src/tools/git.ts` route through the sandbox
-- [ ] `src/doctor.ts` - `sandbox: <mechanism> (read-only/write/network)` or an
-      explicit "unavailable on this host" with the reason
-- [ ] `tests/sandbox/*.test.ts` - policy generation per platform, escape
-      attempts against a temp tree, network-denial, plus a skip-with-reason on
-      hosts without the primitive
+**Status: implemented on macOS and Linux. Not available on Windows, and jaa
+says so rather than pretending.** Two of the three planned modules were
+deliberately not built, and the plan was corrected rather than the claim
+softened:
 
-**Gate:** on each supported platform, a command that writes outside the
-declared roots fails, and a network call under `network: false` fails. Tests
-skip with an explicit reason where the OS primitive is missing -- never a
-silent pass. `jaa doctor` names the active mechanism.
+- Landlock/seccomp (`src/sandbox/linux.ts`) -- not built. Landlock needs a
+  compiled helper binary that jaa does not ship, and seccomp needs a native
+  addon. bubblewrap covers the same filesystem/network/PID guarantees without a
+  build step, so the phase targets it instead. `wrapCommand` now **refuses** a
+  `landlock` request rather than silently substituting bubblewrap and discarding
+  the rules.
+- Win32 Job Objects plus an ACL guard (`src/sandbox/win32.ts`) -- not built.
+  Job Objects need a native Node binding, which would make jaa un-installable
+  without a toolchain. No Windows sandbox exists, and every entry point that can
+  run a command has a `--no-sandbox` opt-out that states what is given up.
+
+- [x] `src/sandbox/types.ts` - `SandboxPolicy` (writable roots, readable roots,
+      network, env passthrough, enforcement), platform capability probe
+- [x] `src/sandbox/generate.ts` - Seatbelt profile and bubblewrap argv from one
+      policy, plus the policy validator that refuses over-broad or
+      self-contradictory roots
+- [x] `src/sandbox/detect.ts` - probes what the host actually supports by
+      running the **real** generated profile, caches per platform, and reports
+      only the guarantees it verified
+- [x] `src/sandbox/apply.ts` - wraps `runProcess`; a tool that cannot be
+      sandboxed declares so, and `require` refuses rather than running wide
+- [x] `src/tools/bash.ts` and `src/tools/git.ts` route through the sandbox
+- [x] `src/tools/git.ts` - the git argv is itself a code-execution surface and is
+      hardened: `-c core.fsmonitor=false`, `--no-ext-diff --no-textconv` on the
+      diff-producing subcommands only, and `git_diff` is treated as code
+- [x] `src/cli/index.ts` - `--no-sandbox` and `--allow-network` on `ask`, `chat`
+      and `agent run`, so an operator can always choose knowingly
+- [x] `src/doctor.ts` - names the active mechanism and its guarantees, and
+      reports the permission decision the gate would actually reach
+- [x] `tests/sandbox.test.ts` - policy generation per platform, mount-shadowing
+      and env-leak regressions, fail-closed behaviour, and live exploit controls
+- [x] `tests/tools.test.ts` - every git tool exercised against a real repository,
+      plus `core.fsmonitor` and diff-driver execution controls
+
+**Gate (macOS/Linux):** a command that writes outside the declared roots fails,
+and a network call under `network: false` fails. **Not yet executed** -- this
+host is Windows, so the Seatbelt and bubblewrap runtime gates are unverified.
+Policy generation, argument construction, validation and the fail-closed path
+are verified here. See BLOCKED.
+
+**Gate (this host, Windows):** `npm run lint` 0; 321/321 tests; `npm run build`
+clean; `npm audit --audit-level=high` 0 vulnerabilities. `jaa doctor` reports the
+sandbox as unavailable with the reason, and `bash` refuses under `require`.
+
+**Two independent security reviews were run and their findings fixed**, not
+waived. The first found a repository-local `git diff` command-driver RCE and a
+capability probe that reported failing binaries as available. The second found
+the same RCE class still open through `core.fsmonitor` -- which also worked on a
+*sandboxed* host, defeating the mitigation -- plus a `git status` that was
+entirely broken by over-broad hardening flags, a `bwrap` profile that failed on
+every Linux command while `doctor` reported it working, an environment
+passthrough that inherited every API key, an operator `allow` that could never
+win, and a permissions line in `doctor` that contradicted `perm test`.
 
 **Risk:** platform sandboxing is the single most failure-prone area in this
-roadmap. Mitigation: every platform module is independently testable, the
-capability probe is mandatory before any enforcement is claimed, and an
-unavailable primitive downgrades to an explicit warning rather than a lie.
+roadmap. Mitigation: the capability probe runs the real generated profile rather
+than a hand-written stand-in, the probe result is memoised, a policy that would
+grant the whole filesystem is refused, and an unavailable primitive downgrades
+to an explicit refusal or a visible warning rather than a lie.
+
+**Known limits, stated rather than hidden:** on Linux the parent environment is
+cleared and rebuilt from the passthrough list, but passthrough *values* appear
+in the child `bwrap` argv and are therefore visible to a process listing of the
+same user. Fixing that needs a different transport. On macOS the Seatbelt
+system-read list has not been validated on real hardware.
 
 ---
 

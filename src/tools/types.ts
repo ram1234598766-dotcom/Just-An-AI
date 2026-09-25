@@ -13,6 +13,14 @@ export interface ToolContext {
   cwd: string;
   /** Whether the bash tool may actually execute commands. */
   allowBash: boolean;
+  /**
+   * Whether a command that needs a shell must also be OS-sandboxed.
+   * `"require"` (the default) refuses the command on a host that cannot
+   * sandbox; `"best-effort"` runs it and reports the degradation on stderr.
+   */
+  sandboxEnforcement?: "require" | "best-effort";
+  /** Whether sandboxed commands may reach the network. Default: no. */
+  allowNetwork?: boolean;
 }
 
 export interface ToolDefinition {

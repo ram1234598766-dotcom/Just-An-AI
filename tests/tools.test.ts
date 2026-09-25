@@ -188,4 +188,96 @@ describe("git tools", () => {
     const out = await registry.execute("git_status", "{}", ctx);
     expect(out).toMatch(/fatal|not a git repository|exit 128/i);
   });
+
+  // Each tool must actually WORK inside a real repository. The non-repo test
+  // above passes for a tool that is entirely broken, because "not a git
+  // repository" is also what a usage error looks like: `git status` rejects
+  // `--no-ext-diff`, and that shipped green until this test existed.
+  describe("against a real repository", () => {
+    const git = async (args: string[], cwd: string): Promise<string> => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      return (await promisify(execFile)("git", args, { cwd })).stdout;
+    };
+
+    beforeEach(async () => {
+      await git(["init", "-q"], tmp);
+      writeFileSync(join(tmp, "a.txt"), "hello\n", "utf8");
+      await git(["config", "user.email", "t@example.com"], tmp);
+      await git(["config", "user.name", "t"], tmp);
+      await git(["add", "a.txt"], tmp);
+      await git(["commit", "-q", "-m", "init"], tmp);
+    });
+
+    it("git_status returns real status output, not a usage error", async () => {
+      writeFileSync(join(tmp, "a.txt"), "changed\n", "utf8");
+      const out = await registry.execute("git_status", "{}", ctx);
+      expect(out).not.toMatch(/unknown option|usage: git/i);
+      expect(out).toContain("a.txt");
+    });
+
+    it("git_log returns real output", async () => {
+      const out = await registry.execute("git_log", "{}", ctx);
+      expect(out).not.toMatch(/unknown option|usage: git/i);
+      expect(out).toContain("init");
+    });
+
+    it("git_diff returns a real diff", async () => {
+      writeFileSync(join(tmp, "a.txt"), "changed\n", "utf8");
+      const out = await registry.execute("git_diff", "{}", ctx);
+      expect(out).not.toMatch(/unknown option|usage: git/i);
+      expect(out).toContain("a.txt");
+    });
+
+    it("git_show returns file content", async () => {
+      const out = await registry.execute("git_show", JSON.stringify({ path: "a.txt" }), ctx);
+      expect(out).not.toMatch(/unknown option|usage: git/i);
+      expect(out).toContain("hello");
+    });
+
+    // `core.fsmonitor` is the same threat as the diff-driver vector -- a
+    // repo-local .git/config entry that git EXECUTES -- and it is reachable by
+    // `git status` and `git diff` alike, so `-c core.fsmonitor=false` is
+    // required. Without it, a write_file into .git/config is code execution.
+    //
+    // The observable is that git ATTEMPTS the hook and reports it. We do not
+    // need the payload to run: the attempt itself is the vulnerability, and it
+    // is observable on every platform, including Windows, where a .cmd payload
+    // is not reliably executed by git's hook machinery.
+    it("never attempts to run a repo-local core.fsmonitor program", async () => {
+      const missing = join(tmp, "definitely-not-here-monitor.exe");
+      await git(["config", "core.fsmonitor", missing], tmp);
+
+      for (const [tool, args] of [
+        ["git_status", "{}"],
+        ["git_diff", "{}"],
+        ["git_log", "{}"],
+        ["git_show", JSON.stringify({ path: "a.txt" })],
+      ] as const) {
+        const out = await registry.execute(tool, args, ctx);
+        expect(out, `${tool} must not invoke core.fsmonitor`).not.toContain("definitely-not-here-monitor");
+      }
+    });
+
+    // Control: prove the attempt is detectable at all, so the test above cannot
+    // pass vacuously. Git surfaces the failed hook on stderr.
+    it("CONTROL: git does report a core.fsmonitor it was told to run", async () => {
+      const missing = join(tmp, "definitely-not-here-monitor.exe");
+      await git(["config", "core.fsmonitor", missing], tmp);
+      // No `-c core.fsmonitor=false` here, so git tries the hook.
+      let stderr = "";
+      try {
+        await git(["status", "--short"], tmp);
+      } catch (err) {
+        stderr = (err as { stderr?: string }).stderr ?? "";
+      }
+      // Git may or may not treat it as fatal, but it always says something.
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const res = await promisify(execFile)("git", ["status", "--short"], { cwd: tmp }).catch(
+        (e: { stderr?: string }) => ({ stdout: "", stderr: e.stderr ?? "" }),
+      );
+      expect(`${stderr}${(res as { stderr?: string }).stderr ?? ""}`).toContain("definitely-not-here-monitor");
+    });
+  });
 });

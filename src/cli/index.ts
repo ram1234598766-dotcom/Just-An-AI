@@ -70,8 +70,8 @@ program
 program
   .command("doctor")
   .description("run environment diagnostics and print a report")
-  .action(() => {
-    console.log(formatReport(runDoctor()));
+  .action(async () => {
+    console.log(formatReport(await runDoctor()));
   });
 
 // --- key -----------------------------------------------------------------
@@ -201,6 +201,11 @@ program
   .option("--no-skills", "disable skill autotrigger injection")
   .option("--mcp-server <command...>", "connect to MCP server(s) for extra tools")
   .option("--permission-mode <mode>", "permission mode: suggest (ask for every non-allowed call), auto-edit, or full-auto")
+  .option(
+    "--no-sandbox",
+    "run shell commands without OS-level isolation (required on hosts with no sandbox, e.g. Windows without a container)",
+  )
+  .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
   .action(async (prompt: string | undefined, opts: {
     prompt?: string;
     provider?: string;
@@ -218,6 +223,8 @@ program
     skills?: boolean;
     mcpServer?: string[];
     permissionMode?: string;
+    sandbox?: boolean;
+    allowNetwork?: boolean;
   }) => {
     const promptText = prompt ?? opts.prompt;
     if (!promptText) throw new Error("provide a prompt: the positional argument or --prompt <text>");
@@ -253,6 +260,10 @@ program
       root: process.cwd(),
       cwd: process.cwd(),
       allowBash: toolsEnabled && opts.bash !== false,
+      // Commander maps `--no-sandbox` to `sandbox: false`. Default is "require":
+      // refuse to run rather than run wide, unless the operator explicitly opts out.
+      sandboxEnforcement: opts.sandbox === false ? "best-effort" : "require",
+      allowNetwork: opts.allowNetwork === true,
     };
 
     // Optional MCP server connections
@@ -413,6 +424,8 @@ program
   .option("--no-bash", "advertise tools but keep the bash shell gated")
   .option("--no-skills", "disable skill autotrigger injection")
   .option("--permission-mode <mode>", "permission mode: suggest, auto-edit, or full-auto")
+  .option("--no-sandbox", "run shell commands without OS-level isolation")
+  .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
   .action(async (opts: {
     provider?: string;
     model?: string;
@@ -428,6 +441,8 @@ program
     skills?: boolean;
     mcpServer?: string[];
     permissionMode?: string;
+    sandbox?: boolean;
+    allowNetwork?: boolean;
   }) => {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error("`jaa chat` needs an interactive terminal — use `jaa ask <prompt>` for one-shot output");
@@ -450,6 +465,8 @@ program
       root: process.cwd(),
       cwd: process.cwd(),
       allowBash: toolsEnabled && opts.bash !== false,
+      sandboxEnforcement: opts.sandbox === false ? "best-effort" : "require",
+      allowNetwork: opts.allowNetwork === true,
     };
     const rawExecuteTool = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
     // The TUI is the primary interactive surface and must be gated exactly like
@@ -559,6 +576,8 @@ agent
   .option("--ctx <n>", "context window in tokens (ollama num_ctx)", parsePositiveInt)
   .option("--no-tools", "run without tool access")
   .option("--allow-bash", "let the subagent run shell commands (off by default, and still permission-gated)")
+  .option("--no-sandbox", "run shell commands without OS-level isolation (required on hosts with no sandbox)")
+  .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
   .option("--permission-mode <mode>", "permission mode: suggest, auto-edit, or full-auto")
   .action(async (name: string, task: string | undefined, opts: {
     provider?: string;
@@ -570,6 +589,8 @@ agent
     ctx?: number;
     tools?: boolean;
     bash?: boolean;
+    sandbox?: boolean;
+    network?: boolean;
     permissionMode?: string;
   }) => {
     const { projectContext, subagents } = loadAgents();
@@ -606,6 +627,11 @@ agent
         // A subagent no longer inherits shell access just because tools are on.
         // It must be opted into, and then it is still subject to the gate.
         allowBash: opts.bash === true,
+        // Commander maps `--no-sandbox` to `sandbox: false`. Without this a
+        // subagent's bash could never run on a host with no OS sandbox, because
+        // `require` is unsatisfiable there and the operator had no way to say so.
+        sandboxEnforcement: opts.sandbox === false ? "best-effort" : "require",
+        allowNetwork: opts.network === true,
         executeTool: (inner) =>
           gateForAgent(
             (call) => inner({ id: call.id ?? "call", name: call.name, arguments: call.arguments }),
@@ -768,6 +794,8 @@ program
     const toolContext: ToolContext = {
       root: process.cwd(),
       cwd: process.cwd(),
+      // The eval harness is a measurement tool, not an operator session: it
+      // must never execute shell commands, sandboxed or not.
       allowBash: false,
     };
     const executeTool: ToolExecutor = (call: { name: string; arguments: string }) =>

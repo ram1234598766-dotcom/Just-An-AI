@@ -9,9 +9,14 @@ const bashSchema = z.object({
 });
 
 /**
- * Shell execution behind an explicit user gate: unless `ctx.allowBash` the tool
- * refuses and tells the model how to unlock it. This is the "ask" in bash
- * safe/ask — the agent can never run commands the operator did not approve.
+ * Shell execution behind two explicit gates.
+ *
+ * 1. `ctx.allowBash` — the operator must have allowed shell access at all.
+ * 2. `ctx.sandboxEnforcement` — when the operator requires a sandbox, a host
+ *    that cannot provide one refuses the command rather than running it wide.
+ *
+ * The command runs confined to the workspace, with outbound network off unless
+ * the operator allowed it.
  */
 async function bashTool(args: unknown, ctx: ToolContext): Promise<string> {
   const { command, timeoutMs } = bashSchema.parse(args);
@@ -22,7 +27,17 @@ async function bashTool(args: unknown, ctx: ToolContext): Promise<string> {
   const result = await runProcess(
     process.platform === "win32" ? "cmd.exe" : "sh",
     process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command],
-    { cwd: ctx.cwd, timeoutMs },
+    {
+      cwd: ctx.cwd,
+      timeoutMs,
+      sandbox: {
+        writableRoots: [ctx.root],
+        readableRoots: [ctx.root],
+        network: ctx.allowNetwork === true,
+        envPassthrough: ["PATH", "HOME", "USERPROFILE", "LANG", "TMPDIR", "TEMP", "TMP", "SystemRoot", "COMSPEC"],
+        enforcement: ctx.sandboxEnforcement ?? "require",
+      },
+    },
   );
 
   const parts: string[] = [];

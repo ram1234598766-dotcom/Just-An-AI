@@ -9,6 +9,7 @@ import {
   MUTATING_TOOLS,
   READ_ONLY_TOOLS,
   ruleMatches,
+  ruleFromSetting,
   ruleSpecificity,
   resolveDecision,
   resolveEngine,
@@ -159,6 +160,18 @@ describe("permission modes", () => {
     }
   });
 
+  it("git_diff is never implicitly allowed, because it can execute a diff driver", () => {
+    for (const mode of ["suggest", "auto-edit", "full-auto"] as const) {
+      expect(resolveDecision({ decision: "ask" }, mode, false, "git_diff")).toBe("ask");
+      expect(resolveDecision({ decision: "ask" }, mode, true, "git_diff")).toBe("ask");
+    }
+  });
+
+  it("git_diff is not classified as read-only", () => {
+    expect(isReadOnlyTool("git_diff")).toBe(false);
+    expect(isReadOnlyTool("git_status")).toBe(true);
+  });
+
   it("an explicit deny is never softened by the mode", () => {
     for (const mode of ["suggest", "auto-edit", "full-auto"] as const) {
       expect(resolveDecision({ decision: "deny" }, mode, true, "read_file")).toBe("deny");
@@ -172,11 +185,43 @@ describe("permission modes", () => {
     }
   });
 
-  it("defaultRules never allows bash implicitly", () => {
+  it("an explicit operator allow CAN grant git_diff, so the gate is usable", () => {
+    // Regression: a default `ask` rule tied on specificity and, being listed
+    // first, always won. So `permissions.allow: ["git_diff"]` was displayed by
+    // `perm list` as a live allow while the tool still refused. There was no
+    // persistent way to enable it at all.
+    const engine = createEngine([
+      ...defaultRules("full-auto"),
+      ruleFromSetting("git_diff", "allow"),
+    ]);
+    const outcome = engine.evaluate(req({ tool: "git_diff" }));
+    expect(resolveDecision(outcome, "full-auto", false, "git_diff")).toBe("allow");
+  });
+
+  it("an explicit operator allow CAN grant bash", () => {
+    const engine = createEngine([...defaultRules("full-auto"), ruleFromSetting("bash", "allow")]);
+    const outcome = engine.evaluate(req({ tool: "bash", args: { command: "ls" } }));
+    expect(resolveDecision(outcome, "full-auto", false, "bash")).toBe("allow");
+  });
+
+  it("still refuses bash and git_diff with no explicit rule, in every mode", () => {
     for (const mode of ["suggest", "auto-edit", "full-auto"] as const) {
       const engine = createEngine(defaultRules(mode));
-      const out = engine.evaluate(req({ tool: "bash", args: { command: "ls" } }));
-      expect(out.decision).not.toBe("allow");
+      expect(resolveDecision(engine.evaluate(req({ tool: "bash", args: { command: "ls" } })), mode, false, "bash")).toBe(
+        "ask",
+      );
+      expect(resolveDecision(engine.evaluate(req({ tool: "git_diff" })), mode, false, "git_diff")).toBe("ask");
+    }
+  });
+
+  it("defaultRules never allows bash or git_diff implicitly, in any mode", () => {
+    for (const mode of ["suggest", "auto-edit", "full-auto"] as const) {
+      const engine = createEngine(defaultRules(mode));
+      expect(engine.evaluate(req({ tool: "bash", args: { command: "ls" } })).decision).not.toBe("allow");
+      expect(engine.evaluate(req({ tool: "git_diff" })).decision).not.toBe("allow");
+      // And the composed effective decision, which is what the gate uses.
+      const outcome = engine.evaluate(req({ tool: "git_diff" }));
+      expect(resolveDecision(outcome, mode, false, "git_diff")).toBe("ask");
     }
   });
 });

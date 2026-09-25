@@ -5,6 +5,11 @@ import type { PermissionMode, PermissionRequest, Rule } from "./types.js";
 /**
  * Tools that only observe the workspace. These are allow-by-default outside
  * `suggest` mode so the common case does not devolve into a prompt storm.
+ *
+ * `git_diff` is deliberately absent: `git diff` will execute a `[diff "x"]
+ * command` driver from a repository-local `.git/config`, which is reachable via
+ * `.gitattributes`, and both files are agent-writable. It is treated as
+ * mutating so it always takes the permission path.
  */
 export const READ_ONLY_TOOLS: readonly string[] = [
   "read_file",
@@ -13,12 +18,21 @@ export const READ_ONLY_TOOLS: readonly string[] = [
   "glob",
   "git_status",
   "git_log",
-  "git_diff",
   "git_show",
 ];
 
-/** Tools that change something on disk or in a repository. */
-export const MUTATING_TOOLS: readonly string[] = ["write_file", "patch", "bash"];
+/** Tools that change something on disk, or that can execute code. */
+export const MUTATING_TOOLS: readonly string[] = ["write_file", "patch", "bash", "git_diff"];
+
+/**
+ * Tools no mode may implicitly allow.
+ *
+ * `bash` runs an arbitrary agent-supplied command. `git_diff` can execute a
+ * repository-local `[diff "<driver>"] command` selected by `.gitattributes`, so
+ * it is code execution by another route even though the argv is jaa's. Both
+ * need an explicit rule or an explicit operator decision.
+ */
+export const NEVER_IMPLICITLY_ALLOWED: readonly string[] = ["bash", "git_diff"];
 
 export function isReadOnlyTool(tool: string): boolean {
   return READ_ONLY_TOOLS.includes(tool);
@@ -192,9 +206,16 @@ export function defaultRules(mode: PermissionMode): Rule[] {
     }
   }
   for (const tool of MUTATING_TOOLS) {
-    if (tool === "bash") {
-      rules.push({ decision: "ask", tool, source: "default" });
-    } else if (mode === "full-auto") {
+    if (NEVER_IMPLICITLY_ALLOWED.includes(tool)) {
+      // Deliberately emit NOTHING here. A default `ask` rule would tie on
+      // specificity with the operator's own rule and win by being listed first,
+      // making `permissions.allow: ["bash"]` silently ineffective while
+      // `perm list` displayed it as a live allow. `resolveDecision` already
+      // returns "ask" for these tools, so omitting them here fails closed
+      // AND leaves an operator able to grant them explicitly.
+      continue;
+    }
+    if (mode === "full-auto") {
       rules.push({ decision: "allow", tool, source: "default" });
     } else {
       rules.push({ decision: "ask", tool, source: "default" });

@@ -4,6 +4,7 @@ import { createDefaultRegistry } from "../tools/index.js";
 import { resolveModel } from "../providers/router.js";
 import type { ChatMessage, ToolCall } from "../providers/types.js";
 import type { ToolContext } from "../tools/types.js";
+import type { SandboxEnforcement } from "../sandbox/types.js";
 
 export interface SubagentOptions {
   /** The task to give the subagent. */
@@ -16,6 +17,14 @@ export interface SubagentOptions {
   tools?: boolean;
   /** Bash access — defaults to false (subagents run without shell by default). */
   allowBash?: boolean;
+  /**
+   * How hard to try to confine shell commands. `require` refuses when no OS
+   * sandbox exists; `best-effort` runs unisolated with a visible warning.
+   * Unset means `require`, so the safe default is preserved for library callers.
+   */
+  sandboxEnforcement?: SandboxEnforcement;
+  /** Whether a confined shell command may reach the network. Defaults to false. */
+  allowNetwork?: boolean;
   /** Max turns for this subagent run. */
   maxTurns?: number;
   /** Token budget for context trimming. */
@@ -79,6 +88,11 @@ export async function runSubagent(
     root: opts.cwd ?? process.cwd(),
     cwd: opts.cwd ?? process.cwd(),
     allowBash: opts.allowBash ?? false,
+    // Without this, a subagent's `bash` defaults to `require` and can never be
+    // satisfied on a host with no OS sandbox -- the call would fail with no way
+    // for the operator to say so. Plumbed from the CLI's `--no-sandbox`.
+    ...(opts.sandboxEnforcement !== undefined ? { sandboxEnforcement: opts.sandboxEnforcement } : {}),
+    ...(opts.allowNetwork !== undefined ? { allowNetwork: opts.allowNetwork } : {}),
   };
   const rawExecute = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
   // Callers can wrap this with the permission gate. Left ungated, a subagent
