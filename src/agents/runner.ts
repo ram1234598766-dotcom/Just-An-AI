@@ -28,6 +28,15 @@ export interface SubagentOptions {
   onAssistantMessage?: (msg: ChatMessage) => void;
   /** Render callback for each tool result. */
   onToolResult?: (call: ToolCall, result: string, ok: boolean) => void;
+  /** Workspace root for path confinement. Defaults to `process.cwd()`. */
+  cwd?: string;
+  /**
+   * Wrap the subagent's tool executor, e.g. with the permission gate. A
+   * subagent can otherwise reach anything the parent session allows.
+   */
+  executeTool?: (
+    inner: (call: ToolCall) => Promise<string>,
+  ) => (call: ToolCall) => Promise<string>;
 }
 
 export interface SubagentResult extends AgentLoopResult {
@@ -67,11 +76,15 @@ export async function runSubagent(
 
   const registry = createDefaultRegistry();
   const toolContext: ToolContext = {
-    root: process.cwd(),
-    cwd: process.cwd(),
+    root: opts.cwd ?? process.cwd(),
+    cwd: opts.cwd ?? process.cwd(),
     allowBash: opts.allowBash ?? false,
   };
-  const executeTool = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
+  const rawExecute = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
+  // Callers can wrap this with the permission gate. Left ungated, a subagent
+  // is a way to reach every tool the parent can, minus whatever the caller
+  // remembered to disable.
+  const executeTool = opts.executeTool ? opts.executeTool(rawExecute) : rawExecute;
 
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },

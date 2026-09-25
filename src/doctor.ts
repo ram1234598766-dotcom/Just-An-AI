@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { hasKey } from "./config/keyring.js";
 import { providerStatuses } from "./config/providers.js";
+import { resolveEngine } from "./permissions/index.js";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -99,6 +100,34 @@ function providersCheck(): DoctorCheck {
 }
 
 /**
+ * Report the effective permission posture: which mode is active, whether a
+ * Claude Code policy was imported, and whether bash is reachable at all. The
+ * point is that an operator can always answer "what is this session allowed
+ * to do" without reading the source.
+ */
+function permissionsCheck(): DoctorCheck {
+  const { mode, rules, projectPolicyFound, projectPolicyApplied } = resolveEngine();
+  const denies = rules.filter((r) => r.decision === "deny");
+  const allows = rules.filter((r) => r.decision === "allow");
+  const bashAllowed = rules.some((r) => r.decision === "allow" && (r.tool === "bash" || r.tool === undefined));
+  const parts = [
+    `${allows.length} allow / ${denies.length} deny rule(s)`,
+    projectPolicyFound
+      ? projectPolicyApplied
+        ? "project .claude/settings.json APPLIED"
+        : "project .claude/settings.json found but NOT applied (untrusted repo)"
+      : "no project .claude/settings.json",
+    bashAllowed ? "bash IS allowed by an explicit rule" : "bash is gated in every mode",
+  ];
+  return {
+    key: "permissions",
+    status: bashAllowed || projectPolicyApplied ? "warn" : "ok",
+    message: `permission mode: ${mode}`,
+    detail: parts.join("; "),
+  };
+}
+
+/**
  * Runs environment diagnostics. All checks are synchronous; git probe uses
  * execFileSync under a try/catch so a missing git never throws.
  */
@@ -110,6 +139,7 @@ export function runDoctor(): DoctorReport {
       dataDirCheck(),
       gitCheck(),
       providersCheck(),
+      permissionsCheck(),
       tmpCheck(),
     ],
   };

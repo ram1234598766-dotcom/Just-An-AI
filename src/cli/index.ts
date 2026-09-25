@@ -4,7 +4,7 @@ import { getPkgInfo } from "../version.js";
 import { formatReport, runDoctor } from "../doctor.js";
 import { ensureJaaHome } from "../config/paths.js";
 import { existsSync } from "node:fs";
-import { defaultSettings, getSetting, loadSettings, saveSettings, setSetting } from "../config/settings.js";
+import { defaultSettings, getSetting, loadSettings, saveSettings, setSetting, settingsLoadIssue } from "../config/settings.js";
 import { listKeyMeta, maskSecret, removeKey, setKey } from "../config/keyring.js";
 import { providerById, PROVIDERS } from "../config/providers.js";
 import { envLayers } from "../config/env.js";
@@ -36,7 +36,22 @@ function parsePositiveInt(value: string): number {
 
 function bootstrap(): void {
   const paths = ensureJaaHome();
-  if (!existsSync(paths.configFile)) saveSettings(defaultSettings());
+  if (!existsSync(paths.configFile)) {
+    saveSettings(defaultSettings());
+    return;
+  }
+  // Force a load so a parse failure is recorded, then report it. A config that
+  // fails to parse has been replaced with defaults, so the operator must be
+  // told, or a typo silently removes their deny rules. (Reading the issue
+  // without loading first would always report "no problem".)
+  loadSettings();
+  const issue = settingsLoadIssue();
+  if (issue) {
+    process.stderr.write(
+      `jaa: warning: ${issue.path} could not be fully loaded (${issue.message}). ` +
+        `Falling back to defaults for the invalid fields; permission rules that survived validation are still in force.\n`,
+    );
+  }
 }
 
 bootstrap();
@@ -185,6 +200,7 @@ program
   .option("--no-bash", "advertise tools but keep the bash shell gated")
   .option("--no-skills", "disable skill autotrigger injection")
   .option("--mcp-server <command...>", "connect to MCP server(s) for extra tools")
+  .option("--permission-mode <mode>", "permission mode: suggest (ask for every non-allowed call), auto-edit, or full-auto")
   .action(async (prompt: string | undefined, opts: {
     prompt?: string;
     provider?: string;
@@ -201,9 +217,11 @@ program
     bash?: boolean;
     skills?: boolean;
     mcpServer?: string[];
+    permissionMode?: string;
   }) => {
     const promptText = prompt ?? opts.prompt;
     if (!promptText) throw new Error("provide a prompt: the positional argument or --prompt <text>");
+    const settings = loadSettings();
     const resumed = opts.resume ? loadSession(opts.resume) : undefined;
     if (opts.resume && !resumed) throw new Error(`session "${opts.resume}" not found`);
 
@@ -254,7 +272,7 @@ program
     const builtInNames = new Set(registry.list().map((t) => t.name));
     const allTools = toolsEnabled ? [...registry.list(), ...allMcpTools(mcpClients)] : undefined;
 
-    const executeTool = async (call: ToolCall) => {
+    const rawExecuteTool = async (call: ToolCall) => {
       if (builtInNames.has(call.name)) {
         return registry.execute(call.name, call.arguments, toolContext);
       }
@@ -263,6 +281,27 @@ program
       }
       return `unknown tool "${call.name}"`;
     };
+
+    // Every tool call, built-in or MCP, passes the permission gate first.
+    const { resolveEngine, createPermissionGate, isPermissionMode, askOnTty, SessionGrants } =
+      await import("../permissions/index.js");
+    const overrideMode = opts.permissionMode ?? settings.permissions?.mode;
+    if (overrideMode !== undefined && !isPermissionMode(overrideMode)) {
+      throw new Error(`unknown permission mode "${overrideMode}" (suggest, auto-edit, full-auto)`);
+    }
+    const { engine, mode } = resolveEngine({ ...(overrideMode !== undefined ? { mode: overrideMode } : {}) });
+    const grants = new SessionGrants();
+    const executeTool = createPermissionGate(
+      (call) => rawExecuteTool({ id: call.id ?? "call", name: call.name, arguments: call.arguments }),
+      engine,
+      mode,
+      {
+        interactive: process.stdin.isTTY === true,
+        cwd: toolContext.cwd,
+        root: toolContext.root,
+        prompt: (request, outcome) => askOnTty(request, outcome, grants),
+      },
+    );
 
     const loopOptions: Parameters<typeof runAgentLoop>[0] = {
       model,
@@ -373,6 +412,7 @@ program
   .option("--no-tools", "run without tool access (plain chat only)")
   .option("--no-bash", "advertise tools but keep the bash shell gated")
   .option("--no-skills", "disable skill autotrigger injection")
+  .option("--permission-mode <mode>", "permission mode: suggest, auto-edit, or full-auto")
   .action(async (opts: {
     provider?: string;
     model?: string;
@@ -387,10 +427,12 @@ program
     bash?: boolean;
     skills?: boolean;
     mcpServer?: string[];
+    permissionMode?: string;
   }) => {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error("`jaa chat` needs an interactive terminal — use `jaa ask <prompt>` for one-shot output");
     }
+    const settings = loadSettings();
 
     const resumed = opts.resume ? loadSession(opts.resume) : undefined;
     if (opts.resume && !resumed) throw new Error(`session "${opts.resume}" not found`);
@@ -409,7 +451,29 @@ program
       cwd: process.cwd(),
       allowBash: toolsEnabled && opts.bash !== false,
     };
-    const executeTool = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
+    const rawExecuteTool = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
+    // The TUI is the primary interactive surface and must be gated exactly like
+    // `jaa ask`. Leaving it ungated made every ungated write a silent allow.
+    const { resolveEngine: resolveForChat, createPermissionGate, isPermissionMode: isModeForChat, askOnTty: askForChat, SessionGrants: GrantsForChat } =
+      await import("../permissions/index.js");
+    const chatMode = opts.permissionMode ?? settings.permissions?.mode;
+    if (chatMode !== undefined && !isModeForChat(chatMode)) {
+      throw new Error(`unknown permission mode "${chatMode}" (suggest, auto-edit, full-auto)`);
+    }
+    const chatPolicy = resolveForChat({ ...(chatMode !== undefined ? { mode: chatMode } : {}) });
+    const chatGrants = new GrantsForChat();
+    const executeTool = createPermissionGate(
+      (call) => rawExecuteTool({ id: call.id ?? "call", name: call.name, arguments: call.arguments }),
+      chatPolicy.engine,
+      chatPolicy.mode,
+      {
+        interactive: true,
+        cwd: toolContext.cwd,
+        root: toolContext.root,
+        grants: chatGrants,
+        prompt: (request, outcome) => askForChat(request, outcome, chatGrants),
+      },
+    );
 
     const { startChat } = await import("../tui/app.js");
     const resumeMessages = resumed?.messages ?? [];
@@ -494,6 +558,8 @@ agent
   .option("--temperature <n>", "sampling temperature", parseFloat)
   .option("--ctx <n>", "context window in tokens (ollama num_ctx)", parsePositiveInt)
   .option("--no-tools", "run without tool access")
+  .option("--allow-bash", "let the subagent run shell commands (off by default, and still permission-gated)")
+  .option("--permission-mode <mode>", "permission mode: suggest, auto-edit, or full-auto")
   .action(async (name: string, task: string | undefined, opts: {
     provider?: string;
     model?: string;
@@ -503,8 +569,11 @@ agent
     temperature?: number;
     ctx?: number;
     tools?: boolean;
+    bash?: boolean;
+    permissionMode?: string;
   }) => {
     const { projectContext, subagents } = loadAgents();
+    const settings = loadSettings();
     const spec = subagents.find((a) => a.name === name);
     if (!spec) throw new Error(`subagent "${name}" not found in AGENTS.md`);
 
@@ -516,6 +585,16 @@ agent
     if (opts.model !== undefined) modelInput.model = opts.model;
 
     const { runSubagent } = await import("../agents/runner.js");
+    const {
+      resolveEngine: resolveForAgent,
+      createPermissionGate: gateForAgent,
+      isPermissionMode: isModeForAgent,
+    } = await import("../permissions/index.js");
+    const agentMode = opts.permissionMode ?? settings.permissions?.mode;
+    if (agentMode !== undefined && !isModeForAgent(agentMode)) {
+      throw new Error(`unknown permission mode "${agentMode}" (suggest, auto-edit, full-auto)`);
+    }
+    const agentPolicy = resolveForAgent({ ...(agentMode !== undefined ? { mode: agentMode } : {}) });
     const result = await runSubagent(
       { projectContext, subagents },
       spec,
@@ -524,7 +603,20 @@ agent
         ...(opts.system !== undefined ? { prompt: opts.system } : {}),
         model: modelInput,
         tools: opts.tools !== false,
-        allowBash: opts.tools !== false,
+        // A subagent no longer inherits shell access just because tools are on.
+        // It must be opted into, and then it is still subject to the gate.
+        allowBash: opts.bash === true,
+        executeTool: (inner) =>
+          gateForAgent(
+            (call) => inner({ id: call.id ?? "call", name: call.name, arguments: call.arguments }),
+            agentPolicy.engine,
+            agentPolicy.mode,
+            {
+              interactive: false,
+              cwd: process.cwd(),
+              root: process.cwd(),
+            },
+          ),
         ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
         ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
@@ -826,6 +918,122 @@ program
       process.stdout.write(toMarkdown(report));
     },
   );
+
+// --- perm ----------------------------------------------------------------
+const perm = program
+  .command("perm")
+  .description("inspect the effective permission rules and test a tool call against them");
+
+perm
+  .command("list")
+  .description("print every effective rule, most specific last, with its source")
+  .option("--mode <mode>", "permission mode: suggest, auto-edit, full-auto")
+  .option("--trust-project-settings", "apply .claude/settings.json from the working directory")
+  .action(async (opts: { mode?: string; trustProjectSettings?: boolean }) => {
+    const { resolveEngine, describeRule, ruleSpecificity, isPermissionMode } = await import("../permissions/index.js");
+    if (opts.mode !== undefined && !isPermissionMode(opts.mode)) {
+      throw new Error(`unknown permission mode "${opts.mode}" (suggest, auto-edit, full-auto)`);
+    }
+    const { mode, rules, projectPolicyFound, projectPolicyApplied } = resolveEngine({
+      ...(opts.mode !== undefined ? { mode: opts.mode } : {}),
+      ...(opts.trustProjectSettings === true ? { trustProjectClaudeSettings: true } : {}),
+    });
+    console.log(`mode: ${mode}`);
+    if (projectPolicyFound) {
+      console.log(
+        projectPolicyApplied
+          ? `project policy: APPLIED from .claude/settings.json (--trust-project-settings)`
+          : `project policy: FOUND at .claude/settings.json but NOT applied (it lives inside the repo; pass --trust-project-settings to honour it)`,
+      );
+    }
+    console.log("");
+    for (const rule of [...rules].sort((a, b) => ruleSpecificity(a) - ruleSpecificity(b))) {
+      console.log(`  [${String(ruleSpecificity(rule)).padStart(4)}] ${describeRule(rule)}`);
+    }
+    // A rule naming a tool that does not exist can never fire. For a deny that
+    // is a silent false sense of security, so say so rather than list it as if
+    // it were active.
+    const known = new Set<string>([
+      "read_file",
+      "write_file",
+      "list_dir",
+      "stat",
+      "glob",
+      "patch",
+      "bash",
+      "fetch_url",
+      "git_status",
+      "git_log",
+      "git_diff",
+      "git_show",
+    ]);
+    const inert = rules.filter(
+      (r) => r.decision === "deny" && r.tool !== undefined && !r.tool.includes("*") && !known.has(r.tool),
+    );
+    if (inert.length > 0) {
+      console.log("");
+      console.log("  WARNING: these deny rules name no known tool and can never fire:");
+      for (const r of inert) console.log(`    - tool "${r.tool}" (from ${r.source}). To block a path use { "path": "..." } instead.`);
+    }
+  });
+
+perm
+  .command("test")
+  .description("evaluate a tool call against the rules without running it")
+  .argument("<tool>", "tool name, e.g. bash")
+  .argument(
+    "[args]",
+    'JSON arguments, e.g. \'{"command":"git status"}\'. Pass "-" or pipe on stdin to avoid shell quoting problems',
+  )
+  .option("--mode <mode>", "permission mode: suggest, auto-edit, full-auto")
+  .action(async (tool: string, argsJson: string | undefined, opts: { mode?: string }) => {
+    const { resolveEngine, isPermissionMode, isReadOnlyTool, resolveDecision, describeRule } =
+      await import("../permissions/index.js");
+    if (opts.mode !== undefined && !isPermissionMode(opts.mode)) {
+      throw new Error(`unknown permission mode "${opts.mode}" (suggest, auto-edit, full-auto)`);
+    }
+    const { engine, mode } = resolveEngine({ ...(opts.mode !== undefined ? { mode: opts.mode } : {}) });
+
+    // Shell quoting mangles JSON containing spaces (notably in PowerShell), so
+    // accept the payload on stdin as well as as an argument.
+    let raw = argsJson;
+    if (raw === undefined && process.stdin.isTTY !== true) {
+      const piped = await readStdinIfPiped();
+      if (piped) raw = piped;
+    } else if (raw === "-") {
+      raw = (await readStdinIfPiped()) ?? "";
+    }
+
+    let args: Record<string, unknown> = {};
+    if (raw !== undefined && raw.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed as Record<string, unknown>;
+        else throw new Error("expected a JSON object");
+      } catch (err) {
+        throw new Error(
+          `arguments must be a JSON object; got ${raw}. (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+    }
+    const outcome = engine.evaluate({ tool, args, cwd: process.cwd(), root: process.cwd() });
+    // The tool name must be passed: it is what makes bash exempt from the
+    // mode's implicit allows.
+    const decision = resolveDecision(outcome, mode, isReadOnlyTool(tool), tool);
+    console.log(`mode:    ${mode}`);
+    console.log(`tool:    ${tool}`);
+    console.log(`decision: ${decision}`);
+    console.log(`reason:  ${outcome.reason}`);
+    if (outcome.rule) console.log(`rule:    ${describeRule(outcome.rule)}`);
+    if (decision === "ask") {
+      console.log("");
+      console.log(
+        process.stdin.isTTY
+          ? "This would prompt interactively."
+          : "This session is non-interactive, so it would be DENIED rather than hang.",
+      );
+    }
+  });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(`jaa: ${err instanceof Error ? err.message : String(err)}`);
