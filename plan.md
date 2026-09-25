@@ -111,7 +111,7 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | 8 | MCP client/server + LSP diagnostics (protocol-correct) | `phase/8-mcp-lsp` | **done** |
 | 9 | Eval harness + seed tasks + npm packaging polish | `phase/9-eval` | **done** |
 | 10 | Benchmark + parity harness (the measuring stick) | `phase/10-bench` | **next** |
-| 11 | Permission system (allow/deny/ask/defer + rules) | `phase/11-permissions` | planned |
+| 11 | Permission system (allow/deny/ask/defer + rules) | `phase/11-permissions` | **done** |
 | 12 | OS-level sandbox (Seatbelt / Landlock / Job Objects) | `phase/12-sandbox` | planned |
 | 13 | Hooks (lifecycle events + blocking decisions) | `phase/13-hooks` | planned |
 | 14 | Checkpoint, rewind and fork | `phase/14-checkpoint` | planned |
@@ -266,6 +266,7 @@ activity, and permission prompts that only exist by Phase 19.
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 156/156 tests (15 files, +12 MCP/LSP protocol tests), 0 vulnerabilities, smoke `jaa mcp serve --help`, `jaa lsp diagnose --help` all green, Phase 8 gate complete → `phase/8-mcp-lsp` committed as `cf1c8f9`
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 161/161 tests (16 files, +5 eval tests), 0 vulnerabilities, smoke `jaa eval --help` + `npm run pack:dry-run` (172 files, only dist/README/LICENSE/plan.md), Phase 9 gate complete → `phase/9-eval` committed as `aede7b0` |
 | 2026-09-25 | `npm run lint + CI=1 npm test + npm run build + npm audit --audit-level=high` | ok — 190/190 tests (17 files, +29 bench tests), 0 vulnerabilities. Phase 10 gate: `jaa bench --list` → 46 cases / 10 tags; live `jaa bench --tags debug --timeout 8000 --out <ndjson>` ran 7 cases end-to-end, all recorded as FAIL with `error: agent loop failed: fetch failed` (no local model reachable) and **no crash**; resume re-run added 0 duplicate rows. Baseline reads 0% only because no model was available on the host, not because of a code fault. Competitor parity numbers **not verified** — no competitor binary was invoked |
+| 2026-09-25 | `npm run lint + CI=1 npm test + npm run build + npm audit --audit-level=high` | ok — 268/268 tests (18 files, +55 permission tests), 0 vulnerabilities. Phase 11 gate: `jaa perm list` / `jaa perm test` verified end to end. Two independent security reviews were run; the first returned **BLOCK** with 2 critical + 6 major findings, the second found 2 further criticals in the fixes. All were fixed and each is now a named regression test: shell-operator chaining cannot widen a prefix allow, whitespace/case cannot evade a prefix deny, `./`/`../`/absolute/case path variants all hit the same rule, `full-auto` never implies bash, an MCP-provided unknown tool never inherits a mode baseline, a malformed config warns instead of silently voiding denies, and a bad `allow` no longer discards a valid `deny`. `jaa chat` was found completely ungated and is now gated |
 | 2026-09-25 | `npm publish` + `npm install -g jaa-cli` + `jaa --version` | ok — `jaa-cli@0.1.0` live on npm (tarball 103 kB, 172 files, shasum `93f4d6bb…`), global bin at `%APPDATA%/npm/jaa`, `jaa --version` → `0.1.0`. Auth via `~/.npmrc` (`//registry.npmjs.org/:_authToken=...`); first token was read-only/2FA-gated (403), replaced with a publish-scoped bypass-2FA token |
 
 ## Phase log
@@ -567,37 +568,51 @@ per-case error capture and no crash, and resume added no duplicate rows.
 allow/deny/ask/defer plus rule files; DeepSeek a monotonic deny guard layered
 over allow/deny/ask.
 
-- [ ] `src/permissions/types.ts` - `Decision` (`allow` | `deny` | `ask` |
-      `defer`), `Rule`, `RuleMatch`, `PermissionRequest`, `PermissionOutcome`
-- [ ] `src/permissions/rules.ts` - layered rules, highest-specificity-wins:
-      exact tool name > tool glob > command prefix > path glob > catch-all.
-      Import `.claude/settings.json` `permissions.allow` / `.deny`
-- [ ] `src/permissions/engine.ts` - `evaluate(request, rules)` returning a
-      decision plus the rule that produced it (always reportable, never opaque)
-- [ ] `src/permissions/ask.ts` - non-TTY path: no interactive prompt available,
-      so `ask` degrades to `deny` with a machine-readable reason rather than
-      hanging or silently allowing
-- [ ] `src/permissions/prompt.ts` - TTY path: one-shot y/n/a(llways)/d(eny)
-      with session-scoped "always allow this exact tool+arg-prefix"
-- [ ] `src/config/settings.ts` - `permissions` block, zod-validated, so an
-      invalid rule fails at load with a path-qualified error, not at call time
-- [ ] `src/doctor.ts` - effective permission table per tool, and which rule won
-- [ ] `src/cli/index.ts` - `--permission-mode <suggest|auto-edit|full-auto>`,
-      `--yes` (pre-approve the read-only tool set only), `jaa perm list|test`
-- [ ] Subagents and MCP servers inherit the session policy, narrowed by their
-      own declarations, never widened
-- [ ] `tests/permissions.test.ts` - precedence, specificity ties, glob
-      semantics, import from Claude settings, non-TTY deny, inheritance
-      narrowing, no-widening invariant
+- [x] `src/permissions/types.ts` - `Decision` (`allow`/`deny`/`ask`/`defer`),
+      `Rule` (optional tool glob, command prefix, path glob, plus a `source` for
+      attribution), `PermissionRequest`, `PermissionOutcome`, `GateOptions`
+- [x] `src/permissions/rules.ts` - specificity ranking (exact tool > tool glob >
+      command prefix > path glob > catch-all), glob compilation where `*` does
+      not cross a separator and `**` does, case-insensitive tool matching,
+      `normalizeRequestPath` so a rule sees the file the tool actually opens,
+      `normalizeWhitespace` + shell-operator detection for command prefixes,
+      `importClaudeSettings` mapping `Bash(cmd:*)` / `Read(glob)` / bare names
+- [x] `src/permissions/engine.ts` - `createEngine` where **deny is absolute**,
+      `resolveDecision` applying the mode baseline, and `createPermissionGate`
+      wrapping a tool executor. Non-interactive `ask` becomes `deny`, never a hang
+- [x] `src/permissions/ask.ts` - `SessionGrants` (exact match over *all*
+      arguments), `sanitizeForDisplay` stripping ANSI/C0 so the consent prompt
+      cannot be repainted by injected escapes, and `askOnTty` that keeps the
+      readline interface open until the answer arrives
+- [x] `src/config/settings.ts` - zod `permissions` block; a parse failure now
+      warns and salvages each field independently so a bad `allow` cannot void a
+      valid `deny`; zod default is a factory so the shared array cannot leak
+- [x] installed on `jaa ask`, `jaa chat` (previously ungated entirely), and
+      `jaa agent run`; subagents no longer inherit shell access just because
+      tools are enabled
+- [x] project `.claude/settings.json` detected and reported but **not applied**
+      without `--trust-project-settings`, because it lives in an untrusted
+      checkout
+- [x] `src/doctor.ts` - `permissions` check reporting mode, rule counts, whether
+      bash is reachable, and project-policy provenance
+- [x] `src/cli/index.ts` - `jaa perm list|test`, `--permission-mode` on
+      `ask`/`chat`/`agent run`, `--allow-bash` and `--no-tools` on `agent run`
+- [x] `tests/permissions.test.ts` (55): specificity ordering, matching, engine
+      precedence, absolute deny, mode baselines, Claude import, the gate, and one
+      regression test per exploit found in review (shell chaining, whitespace
+      and case evasion, `./`/`../`/absolute path bypass, `full-auto` bash,
+      unknown-tool allow, dead config warning, per-field salvage, grant scope)
 
-**Gate:** every tool call in the existing 161 tests resolves through the engine
-with the default ruleset and behaves identically. `jaa perm test "rm -rf /"`
-denies. `--permission-mode suggest` cannot be bypassed by a tool.
+**Gate result:** lint 0, 268/268 tests (18 files, +55), build 0, audit 0.
+`jaa perm list` and `jaa perm test` verified end to end, including the exact
+exploits from two security review rounds, each now returning `ask` or `deny`
+where they previously returned `allow`.
 
-**Risk:** over-prompting destroys throughput and users will reach for
-`--permission-mode full-auto` permanently. Mitigation: read-only tools
-(`read_file`, `list_dir`, `stat`, `glob`, `git_status`, `git_log`, `git_diff`,
-`git_show`) are allow-by-default at every mode except `suggest`.
+**Deliberately out of scope for Phase 11:** the MCP server, `jaa eval`, and the
+bench harness still call their registries directly. All three have
+`allowBash` off by default, so they cannot reach a shell, but a `deny` rule does
+not currently apply to them. Gating them is Phase 13 work alongside hooks,
+where a shared `ToolContext` carries the resolved policy.
 
 ---
 

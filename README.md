@@ -71,6 +71,62 @@ calls: `fileExists`, `fileContains`, `fileAbsent`, `finalContains`,
 `untouched`, `noError`. Cases run in a throwaway directory that is removed
 afterwards, so a bad case cannot damage your repo.
 
+## Permissions
+
+Every tool call — in `ask`, `chat`, and `agent run` — passes a policy engine
+before it runs. A denial is returned to the model as a result string, so the
+agent can recover instead of crashing.
+
+```bash
+jaa perm list                                    # every effective rule, with its source
+jaa perm list --mode full-auto
+jaa perm test bash '{"command":"rm -rf /"}'      # evaluate a call without running it
+echo '{"command":"git status"}' | jaa perm test bash   # stdin avoids shell quoting
+jaa perm list --trust-project-settings           # also honour .claude/settings.json
+```
+
+**Modes.** `suggest` (default) asks for anything not explicitly allowed.
+`auto-edit` allows read-only tools and asks about writes. `full-auto` allows
+known writes. **Bash is never implicitly allowed in any mode** — shell access
+always needs an explicit rule or an explicit operator decision. A tool jaa does
+not itself register (anything an MCP server advertises) also gets no mode
+baseline, because jaa cannot know what it does.
+
+**Rules** live in `~/.jaa/config.json` and may combine `tool`, `command`, and
+`path`. The most specific match wins, and **deny is absolute** — no allow can
+override it.
+
+```json
+{
+  "permissions": {
+    "mode": "auto-edit",
+    "allow": [{ "tool": "bash", "command": "git status" }],
+    "deny": [{ "path": ".env" }, { "command": "git push" }]
+  }
+}
+```
+
+A bare string is a **tool name**, not a path: `"deny": [".env"]` matches no
+tool and does nothing. Use `{ "path": ".env" }`. `jaa perm list` warns about
+any deny rule that can never fire.
+
+**Fail-closed by construction.** A command containing a shell operator
+(`&&`, `;`, `|`, backtick, `$(`, redirect, newline) is never claimed by a
+prefix rule, so an allow on `git status` cannot be widened to
+`git status && rm -rf /`. Prefix comparison is whitespace-normalised and
+case-insensitive. Path rules match the resolved root-relative path, so `./`,
+`../`, absolute, and case-variant spellings all hit the same rule. In a
+non-interactive session an `ask` becomes a `deny` rather than a hang.
+
+**Project policy is not trusted.** A `.claude/settings.json` in the working
+directory is detected and reported, but not applied unless you pass
+`--trust-project-settings`: that file lives inside a cloned repository, so
+honouring it automatically would let the repository widen your permissions.
+
+**A malformed config warns and fails closed.** Each permission field is
+validated independently, so a typo in `allow` can no longer silently void your
+`deny` list.
+
 ## Quickstart
 
 ```bash
@@ -100,6 +156,7 @@ Precedence: process env > project `.env` > `~/.jaa/.env`. Local providers
 | `jaa doctor` | Environment diagnostics |
 | `jaa mcp serve [--allow-bash]` | Expose jaa tools as an MCP stdio server |
 | `jaa lsp diagnose` | LSP diagnostics |
+| `jaa perm list|test` | Inspect the effective permission policy |
 | `jaa eval [options]` | Eval harness |
 | `jaa bench [options]` | Parity benchmark across harnesses |
 
