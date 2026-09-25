@@ -22,6 +22,9 @@ import {
   installFromGitHub, installFromUrl, listSkillIds, removeSkill,
 } from "../skills/index.js";
 import { loadAgents } from "../agents/index.js";
+import { McpClient, allMcpTools, executeMcpTool } from "../mcp/index.js";
+import type { ResolvedModel } from "../providers/types.js";
+import type { ToolExecutor } from "../agent/loop.js";
 
 const pkg = getPkgInfo();
 
@@ -179,9 +182,10 @@ program
   .option("--save", "persist the conversation to a new session")
   .option("--json", "emit machine-readable JSON to stdout instead of prose")
   .option("--no-tools", "run without tool access (plain chat only)")
-    .option("--no-bash", "advertise tools but keep the bash shell gated")
-    .option("--no-skills", "disable skill autotrigger injection")
-    .action(async (prompt: string | undefined, opts: {
+  .option("--no-bash", "advertise tools but keep the bash shell gated")
+  .option("--no-skills", "disable skill autotrigger injection")
+  .option("--mcp-server <command...>", "connect to MCP server(s) for extra tools")
+  .action(async (prompt: string | undefined, opts: {
     prompt?: string;
     provider?: string;
     model?: string;
@@ -196,6 +200,7 @@ program
     tools?: boolean;
     bash?: boolean;
     skills?: boolean;
+    mcpServer?: string[];
   }) => {
     const promptText = prompt ?? opts.prompt;
     if (!promptText) throw new Error("provide a prompt: the positional argument or --prompt <text>");
@@ -232,17 +237,49 @@ program
       allowBash: toolsEnabled && opts.bash !== false,
     };
 
+    // Optional MCP server connections
+    const mcpClients: McpClient[] = [];
+    const mcpServers = opts.mcpServer ?? [];
+    if (mcpServers.length > 0) {
+      for (const spec of mcpServers) {
+        const parts = spec.split(/\s+/);
+        const cmd = parts[0]!;
+        const args = parts.slice(1);
+        const client = new McpClient(cmd, args);
+        await client.connect();
+        mcpClients.push(client);
+      }
+    }
+
+    const builtInNames = new Set(registry.list().map((t) => t.name));
+    const allTools = toolsEnabled ? [...registry.list(), ...allMcpTools(mcpClients)] : undefined;
+
+    const executeTool = async (call: ToolCall) => {
+      if (builtInNames.has(call.name)) {
+        return registry.execute(call.name, call.arguments, toolContext);
+      }
+      if (mcpClients.length > 0) {
+        return executeMcpTool(mcpClients, call);
+      }
+      return `unknown tool "${call.name}"`;
+    };
+
     const loopOptions: Parameters<typeof runAgentLoop>[0] = {
       model,
       messages,
-      executeTool: (call) => registry.execute(call.name, call.arguments, toolContext),
+      executeTool,
     };
-    if (toolsEnabled) loopOptions.tools = registry.list();
+    if (allTools && allTools.length > 0) loopOptions.tools = allTools;
     if (opts.maxTurns !== undefined) loopOptions.maxTurns = opts.maxTurns;
     if (opts.tokenBudget !== undefined) loopOptions.tokenBudget = opts.tokenBudget;
     if (opts.temperature !== undefined) loopOptions.temperature = opts.temperature;
     if (opts.ctx !== undefined) loopOptions.numContext = opts.ctx;
     const result = await runAgentLoop(loopOptions);
+
+    // Disconnect MCP servers
+    for (const client of mcpClients) {
+      await client.disconnect().catch(() => {});
+    }
 
     const delta = result.messages.slice(resumed ? resumed.messages.length : messages.length);
     const persisted = resumed || opts.save;
@@ -349,6 +386,7 @@ program
     tools?: boolean;
     bash?: boolean;
     skills?: boolean;
+    mcpServer?: string[];
   }) => {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error("`jaa chat` needs an interactive terminal — use `jaa ask <prompt>` for one-shot output");
@@ -542,6 +580,133 @@ skill
     const removed = removeSkill(id);
     if (!removed) throw new Error(`skill "${id}" not found`);
     console.log(`removed skill "${id}"`);
+  });
+
+// --- mcp ------------------------------------------------------------------
+const mcp = program
+  .command("mcp")
+  .description("MCP (Model Context Protocol) server and client utilities");
+
+mcp
+  .command("serve")
+  .description("run the jaa MCP server over stdio (exposes jaa's built-in tools)")
+  .option("--allow-bash", "allow the bash tool to execute commands (off by default)")
+  .action(async (opts: { allowBash?: boolean }) => {
+    const { createJaaMcpServer } = await import("../mcp/jaa-server.js");
+    const server = createJaaMcpServer(opts.allowBash === true);
+    await server.run();
+  });
+
+mcp
+  .command("inspect")
+  .description("connect to an MCP server and list its tools (for debugging)")
+  .argument("<command...>", "MCP server command to run")
+  .action(async (command: string[]) => {
+    const cmd = command[0]!;
+    const args = command.slice(1);
+    const client = new McpClient(cmd, args);
+    await client.connect();
+    const tools = client.tools;
+    if (tools.length === 0) {
+      console.log("no tools advertised");
+    } else {
+      for (const tool of tools) {
+        console.log(`${tool.name.padEnd(20)} ${(tool.description ?? "").slice(0, 60)}`);
+      }
+    }
+    await client.disconnect();
+  });
+
+// --- lsp ------------------------------------------------------------------
+const lsp = program
+  .command("lsp")
+  .description("LSP (Language Server Protocol) utilities");
+
+lsp
+  .command("diagnose")
+  .description("fetch diagnostics for a file from an LSP server")
+  .argument("<file>", "file path to diagnose")
+  .argument("<command...>", "LSP server command to run")
+  .action(async (filePath: string, command: string[]) => {
+    const { resolve } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+    const { LspClient } = await import("../lsp/client.js");
+    const cmd = command[0]!;
+    const args = command.slice(1);
+    const uri = pathToFileURL(resolve(filePath)).href;
+    const client = new LspClient(cmd, args);
+    try {
+      await client.connect();
+      const result = await client.getDiagnostics(uri);
+      if (!result || result.kind === "unchanged" || result.items.length === 0) {
+        console.log("no diagnostics");
+      } else {
+        for (const item of result.items) {
+          const sev = item.severity ?? 1;
+          const label = sev === 1 ? "ERROR" : sev === 2 ? "WARN" : sev === 3 ? "INFO" : "HINT";
+          const pos = item.range?.start;
+          if (pos) {
+            console.log(`[${label}] ${pos.line + 1}:${pos.character + 1} ${item.message}${item.source ? ` (${item.source})` : ""}`);
+          } else {
+            console.log(`[${label}] ${item.message}${item.source ? ` (${item.source})` : ""}`);
+          }
+        }
+      }
+    } finally {
+      await client.disconnect().catch(() => {});
+    }
+  });
+
+// --- eval ----------------------------------------------------------------
+program
+  .command("eval")
+  .description("run the built-in eval harness (seed tasks + JSON tasks) and print pass@1 / pass@N metrics")
+  .option("--provider <id>", "provider id (defaults to settings defaultProvider, then ollama)")
+  .option("--model <model>", "model id")
+  .option("--tasks <dir>", "directory of JSON task files (default: seed tasks)")
+  .option("--retries <n>", "retries per failing task", parsePositiveInt)
+  .option("--json", "emit machine-readable JSON to stdout")
+  .action(async (opts: { provider?: string; model?: string; tasks?: string; retries?: number; json?: boolean }) => {
+    const { runEvalTask, summarize, seedTasks, loadTasks } = await import("../eval/index.js");
+    const modelInput: { provider?: string; model?: string } = {};
+    if (opts.provider !== undefined) modelInput.provider = opts.provider;
+    if (opts.model !== undefined) modelInput.model = opts.model;
+    const model = resolveModel(modelInput);
+    const registry = createDefaultRegistry();
+    const toolContext: ToolContext = {
+      root: process.cwd(),
+      cwd: process.cwd(),
+      allowBash: false,
+    };
+    const executeTool: ToolExecutor = (call: { name: string; arguments: string }) =>
+      registry.execute(call.name, call.arguments, toolContext);
+
+    const tasks = opts.tasks ? loadTasks(opts.tasks) : seedTasks;
+    if (tasks.length === 0) throw new Error("no eval tasks found");
+
+    const runs: Array<Awaited<ReturnType<typeof runEvalTask>>> = [];
+    const evalOptions: { model: ResolvedModel; executeTool: ToolExecutor; retries?: number } = { model, executeTool };
+    if (opts.retries !== undefined) evalOptions.retries = opts.retries;
+    for (const task of tasks) {
+      const run = await runEvalTask(task, evalOptions);
+      runs.push(run);
+    }
+    const summary = summarize(runs);
+
+    if (opts.json) {
+      console.log(JSON.stringify({ ...summary, runs }, null, 2));
+      return;
+    }
+
+    for (const run of runs) {
+      const status = run.pass ? "PASS" : "FAIL";
+      const checks = run.checks.map((c: { pass: boolean; name: string }) => `${c.pass ? "✓" : "✗"} ${c.name}`).join(", ");
+      console.log(`[${status}] ${run.taskId} (turns=${run.turns} retries=${run.retries}) — ${checks}`);
+    }
+    console.log(
+      `pass@1: ${summary.passAt1}/${summary.total} · pass@N: ${summary.passAtN}/${summary.total} · ` +
+        `${summary.totalInputTokens} in / ${summary.totalOutputTokens} out · ${summary.totalDurationMs}ms`,
+    );
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
