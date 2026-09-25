@@ -17,7 +17,11 @@ import type { ToolCall } from "../providers/types.js";
 import { createDefaultRegistry } from "../tools/index.js";
 import type { ToolContext } from "../tools/types.js";
 import { toJsonAskResult } from "./json.js";
-import { loadSkills, matchSkills, skillContext, installFromGitHub, installFromUrl, listSkillIds, removeSkill } from "../skills/index.js";
+import {
+  loadSkills, matchSkills, skillContext,
+  installFromGitHub, installFromUrl, listSkillIds, removeSkill,
+} from "../skills/index.js";
+import { loadAgents } from "../agents/index.js";
 
 const pkg = getPkgInfo();
 
@@ -401,6 +405,102 @@ program
     if (session && session.messages.length > resumeMessages.length) {
       console.error(`conversation saved to session ${session.id}`);
     }
+  });
+
+// --- agent -----------------------------------------------------------------
+const agent = program
+  .command("agent")
+  .description("manage subagents defined in AGENTS.md");
+
+agent
+  .command("list")
+  .description("list subagents defined in AGENTS.md")
+  .action(() => {
+    const { subagents } = loadAgents();
+    if (subagents.length === 0) {
+      console.log("no subagents defined in AGENTS.md");
+      return;
+    }
+    for (const a of subagents) {
+      console.log(`${a.name.padEnd(20)} ${a.description}`);
+    }
+  });
+
+agent
+  .command("show")
+  .description("show details for a subagent")
+  .argument("<name>", "subagent name")
+  .action((name: string) => {
+    const { subagents } = loadAgents();
+    const spec = subagents.find((a) => a.name === name);
+    if (!spec) throw new Error(`subagent "${name}" not found in AGENTS.md`);
+    console.log(`# Agent: ${spec.name}\n`);
+    console.log(`Description:  ${spec.description || "(none)"}`);
+    console.log(`Ownership:    ${spec.ownership || "(none)"}`);
+    console.log(`Deps:         ${spec.deps || "(none)"}`);
+    console.log(`Acceptance:   ${spec.acceptance || "(none)"}`);
+    console.log("\n--- Instructions ---\n");
+    console.log(spec.instructions || "(none)");
+  });
+
+agent
+  .command("run")
+  .description("run a subagent on a task")
+  .argument("<name>", "subagent name (from AGENTS.md)")
+  .argument("[task]", "task for the subagent")
+  .option("-p, --provider <id>", "provider id")
+  .option("-m, --model <model>", "model id")
+  .option("--system <prompt>", "override the subagent's system prompt")
+  .option("--max-turns <n>", "cap the agent loop at n turns", parsePositiveInt)
+  .option("--token-budget <n>", "context budget in estimated tokens", parsePositiveInt)
+  .option("--temperature <n>", "sampling temperature", parseFloat)
+  .option("--ctx <n>", "context window in tokens (ollama num_ctx)", parsePositiveInt)
+  .option("--no-tools", "run without tool access")
+  .action(async (name: string, task: string | undefined, opts: {
+    provider?: string;
+    model?: string;
+    system?: string;
+    maxTurns?: number;
+    tokenBudget?: number;
+    temperature?: number;
+    ctx?: number;
+    tools?: boolean;
+  }) => {
+    const { projectContext, subagents } = loadAgents();
+    const spec = subagents.find((a) => a.name === name);
+    if (!spec) throw new Error(`subagent "${name}" not found in AGENTS.md`);
+
+    const taskText = task ?? "";
+    if (!taskText) throw new Error("provide a task: the positional argument");
+
+    const modelInput: { provider?: string; model?: string } = {};
+    if (opts.provider !== undefined) modelInput.provider = opts.provider;
+    if (opts.model !== undefined) modelInput.model = opts.model;
+
+    const { runSubagent } = await import("../agents/runner.js");
+    const result = await runSubagent(
+      { projectContext, subagents },
+      spec,
+      {
+        task: taskText,
+        ...(opts.system !== undefined ? { prompt: opts.system } : {}),
+        model: modelInput,
+        tools: opts.tools !== false,
+        allowBash: opts.tools !== false,
+        ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+        ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        ...(opts.ctx !== undefined ? { numContext: opts.ctx } : {}),
+      },
+    );
+
+    for (const msg of result.messages) {
+      if (msg.role === "assistant" && msg.content) console.log(msg.content);
+    }
+
+    console.error(
+      `[${result.stopReason}] ${result.turns} turn(s) · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out`,
+    );
   });
 
 // --- skill ----------------------------------------------------------------
