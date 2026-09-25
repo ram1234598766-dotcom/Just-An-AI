@@ -110,8 +110,9 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 129/129 tests (12 files incl. 23 new skills tests), 0 vulnerabilities, smoke `jaa skill list`/`--help`/ask `--no-skills` all green, Phase 6 gate complete → `phase/6-skills` committed as `8f40eaa`
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 144/144 tests (13 files, +15 agents tests), 0 vulnerabilities, smoke `jaa agent list`/`jaa agent show code-reviewer` all green, Phase 7 gate complete → `phase/7-subagents` committed as `69739e7`
-| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 156/156 tests (15 files, +12 MCP/LSP protocol tests), 0 vulnerabilities, smoke `jaa mcp serve --help`, `jaa lsp diagnose --help` all green, Phase 8 gate complete → `phase/8-mcp-lsp` committed as `pending`
-| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 161/161 tests (16 files, +5 eval tests), 0 vulnerabilities, smoke `jaa eval --help` + `npm run pack:dry-run` (172 files, only dist/README/LICENSE/plan.md), Phase 9 gate complete → `phase/9-eval` committed as `pending`
+| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 156/156 tests (15 files, +12 MCP/LSP protocol tests), 0 vulnerabilities, smoke `jaa mcp serve --help`, `jaa lsp diagnose --help` all green, Phase 8 gate complete → `phase/8-mcp-lsp` committed as `cf1c8f9`
+| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 161/161 tests (16 files, +5 eval tests), 0 vulnerabilities, smoke `jaa eval --help` + `npm run pack:dry-run` (172 files, only dist/README/LICENSE/plan.md), Phase 9 gate complete → `phase/9-eval` committed as `aede7b0`
+| 2026-09-25 | `npm publish` + `npm install -g jaa-cli` + `jaa --version` | ok — `jaa-cli@0.1.0` live on npm (tarball 103 kB, 172 files, shasum `93f4d6bb…`), global bin at `%APPDATA%/npm/jaa`, `jaa --version` → `0.1.0`. Auth via `~/.npmrc` (`//registry.npmjs.org/:_authToken=...`); first token was read-only/2FA-gated (403), replaced with a publish-scoped bypass-2FA token |
 
 ## Phase log
 
@@ -244,7 +245,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] `src/cli/index.ts`: `mcp serve --allow-bash`, repeatable `--mcp-server`, `--no-tools` guards, `lsp diagnose` uses `pathToFileURL`
 - [x] tests → `tests/mcp.test.ts` (7: framing, split/coalesced/CRLF, incomplete trailing, server lifecycle, tool validation, error resilience) + `tests/lsp.test.ts` (5: Content-Length encode/decode, split/coalesced, extra headers, incomplete bodies, invalid lengths)
 - [x] phase gate → lint ok, test 156/156 (15 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities
-- [x] phase commit on `phase/8-mcp-lsp` → **pending**
+- [x] phase commit on `phase/8-mcp-lsp` → `cf1c8f9`
 
 ### Phase 9 — eval harness + seed tasks + npm packaging polish *(done)*
 - [x] `src/eval/types.ts`: `EvalTask`/`EvalRun`/`EvalCheck` types; tasks carry checks, setup, and optional tool/turn/budget overrides
