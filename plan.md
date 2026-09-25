@@ -98,29 +98,29 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 
 ## Status board
 
-| # | Phase | Branch | Status |
+| # | Phase | Commit | Status |
 |---|-------|--------|--------|
-| 0 | Repo scaffold + CLI skeleton | `phase/0-baseline` | **done** |
-| 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `phase/1-config` | **done** |
-| 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | **done** |
-| 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | **done** |
-| 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | **done** |
-| 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | **done** |
-| 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | **done** |
-| 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | **done** |
-| 8 | MCP client/server + LSP diagnostics (protocol-correct) | `phase/8-mcp-lsp` | **done** |
-| 9 | Eval harness + seed tasks + npm packaging polish | `phase/9-eval` | **done** |
-| 10 | Benchmark + parity harness (the measuring stick) | `phase/10-bench` | **next** |
-| 11 | Permission system (allow/deny/ask/defer + rules) | `phase/11-permissions` | **done** |
-| 12 | OS-level sandbox (Seatbelt / Landlock / Job Objects) | `phase/12-sandbox` | planned |
-| 13 | Hooks (lifecycle events + blocking decisions) | `phase/13-hooks` | planned |
-| 14 | Checkpoint, rewind and fork | `phase/14-checkpoint` | planned |
-| 15 | Multi-agent orchestration (parallel + worktrees + background) | `phase/15-multiagent` | planned |
-| 16 | Compaction and persistent memory | `phase/16-compaction` | planned |
-| 17 | Live code intelligence (LSP in the loop) | `phase/17-lsp-loop` | planned |
-| 18 | Compatibility and interop layer | `phase/18-compat` | planned |
-| 19 | Plugin system and registry | `phase/19-plugins` | planned |
-| 20 | TUI overhaul (multi-pane, tool cards, dashboard) | `phase/20-tui` | planned |
+| 0 | Repo scaffold + CLI skeleton | `b001053` | **done** |
+| 1 | Config + keyring (`~/.jaa`, env precedence, `key/config/setup/doctor`) | `6acc554` | **done** |
+| 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `a01abfd` | **done** |
+| 3 | Agent loop + context budgeting + sessions | `7d59ed4` | **done** |
+| 4 | Tools (fs, patch, bash safe/ask, web, git) | `1390502` | **done** |
+| 5 | Ink TUI + `-p`/`--json` non-interactive mode | `bf16eb1` | **done** |
+| 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `8f40eaa` | **done** |
+| 7 | Subagents + AGENTS.md project memory | `69739e7` | **done** |
+| 8 | MCP client/server + LSP diagnostics (protocol-correct) | `cf1c8f9` | **done** |
+| 9 | Eval harness + seed tasks + npm packaging polish | `aede7b0` | **done** |
+| 10 | Benchmark + parity harness (the measuring stick) | `f8b6928` | **next** |
+| 11 | Permission system (allow/deny/ask/defer + rules) | `09cb41f` | **done** |
+| 12 | OS-level sandbox (Seatbelt / Landlock / Job Objects) | - | planned |
+| 13 | Hooks (lifecycle events + blocking decisions) | - | planned |
+| 14 | Checkpoint, rewind and fork | - | planned |
+| 15 | Multi-agent orchestration (parallel + worktrees + background) | - | planned |
+| 16 | Compaction and persistent memory | - | planned |
+| 17 | Live code intelligence (LSP in the loop) | - | planned |
+| 18 | Compatibility and interop layer | - | planned |
+| 19 | Plugin system and registry | - | planned |
+| 20 | TUI overhaul (multi-pane, tool cards, dashboard) | - | planned |
 
 ### Dependency order
 
@@ -146,6 +146,13 @@ activity, and permission prompts that only exist by Phase 19.
 
 ## Decisions (dated)
 
+- **2026-09-25 — Single branch: `main` only.** The owner directed that all work
+  commit and push straight to `main`, with no feature branches. The six
+  `phase/*` branches (0 through 11) were already fully merged and have been
+  deleted locally; `main` was at `09cb41f` before this change and is in sync
+  with `origin/main`. Historical branch names in the phase log below are left
+  exactly as written, because they record what actually happened at the time.
+  The status board's `Branch` column is now `Commit`.
 - **2026-09-25 — Competitive bar set:** jaa must beat the *union* of Claude Code,
   Codex CLI, DeepSeek Harness, and opencode, not any one of them. Phases 11-20
   are the competitive core; anything outside it is listed under "Deferred past

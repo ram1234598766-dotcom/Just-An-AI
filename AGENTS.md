@@ -38,7 +38,10 @@ secrets ever baked into the repo.
   imported and client-only in VantaOS; in jaa, provider SDKs are statically
   imported but the TUI (ink) is dynamically loaded in `jaa chat`.
 - Tests must not touch the real `~/.jaa` — always override `JAA_HOME`.
-- Phase commits happen on `phase/<n>-<slug>` branches. No push.
+- **Single branch: `main` only.** All work is committed and pushed directly to
+  `main`. Do not create `phase/<n>-<slug>` branches or any other feature branch.
+  Conventional commits, one logical change each, so history stays legible without
+  branch separation.
 - No ESLint — `tsc --noEmit` is the type gate.
 
 ## Subagents
