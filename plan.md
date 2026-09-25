@@ -19,8 +19,8 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | **done** |
 | 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | **done** |
 | 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | **done** |
-| 8 | MCP client/server + LSP diagnostics (first cut) | `phase/8-mcp-lsp` | pending |
-| 9 | Eval harness + seed tasks + npm packaging polish | `phase/9-eval` | pending |
+| 8 | MCP client/server + LSP diagnostics (protocol-correct) | `phase/8-mcp-lsp` | **done** |
+| 9 | Eval harness + seed tasks + npm packaging polish | `phase/9-eval` | **done** |
 | 10 | Head-to-head benchmark vs reference agents | `phase/10-bench` | **ON HOLD** (owner) |
 
 ## Decisions (dated)
@@ -110,6 +110,8 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 129/129 tests (12 files incl. 23 new skills tests), 0 vulnerabilities, smoke `jaa skill list`/`--help`/ask `--no-skills` all green, Phase 6 gate complete → `phase/6-skills` committed as `8f40eaa`
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 144/144 tests (13 files, +15 agents tests), 0 vulnerabilities, smoke `jaa agent list`/`jaa agent show code-reviewer` all green, Phase 7 gate complete → `phase/7-subagents` committed as `69739e7`
+| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 156/156 tests (15 files, +12 MCP/LSP protocol tests), 0 vulnerabilities, smoke `jaa mcp serve --help`, `jaa lsp diagnose --help` all green, Phase 8 gate complete → `phase/8-mcp-lsp` committed as `pending`
+| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 161/161 tests (16 files, +5 eval tests), 0 vulnerabilities, smoke `jaa eval --help` + `npm run pack:dry-run` (172 files, only dist/README/LICENSE/plan.md), Phase 9 gate complete → `phase/9-eval` committed as `pending`
 
 ## Phase log
 
@@ -230,8 +232,33 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] phase gate → lint ok, test 144/144 (13 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities, smoke `jaa agent list`/`jaa agent show code-reviewer` all green
 - [x] phase commit on `phase/7-subagents` → `69739e7`
 
-### Phase 8 — MCP client/server + LSP diagnostics (first cut) *(next)*
-### Phase 9 — eval harness + seed tasks + npm packaging polish
+### Phase 8 — MCP client/server + LSP diagnostics (protocol-correct) *(done)*
+- [x] `src/mcp/framing.ts`: newline-delimited JSON framing (encode/decode/decodeFrames) for MCP stdio
+- [x] `src/mcp/types.ts`: strict MCP types with optional fields (`MCP_PROTOCOL_VERSION = "2024-11-05"`)
+- [x] `src/mcp/validation.ts`: `isRecord`, `isRequestId` boundary helpers
+- [x] `src/mcp/server.ts`: `McpServer` with injectable streams, idempotent `run()`, JSON-RPC lifecycle (initialize/initialized state, `-32002` before init, `-32602` invalid params, `isError` on tool failures)
+- [x] `src/mcp/client.ts`: `McpClient` with proper handshake (`notifications/initialized`), concurrent request correlation, timeouts, spawn/exit errors, idempotent disconnect
+- [x] `src/mcp/jaa-server.ts`: routes MCP tools through `createDefaultRegistry()` with bash opt-in (`createJaaMcpServer(allowBash = false)`)
+- [x] `src/lsp/framing.ts`: independent LSP `Content-Length` framing with extra-header support, duplicate/missing/oversize validation
+- [x] `src/lsp/client.ts`: LSP client using LSP framing, document lifecycle, diagnostic-response validation, safe disconnect
+- [x] `src/cli/index.ts`: `mcp serve --allow-bash`, repeatable `--mcp-server`, `--no-tools` guards, `lsp diagnose` uses `pathToFileURL`
+- [x] tests → `tests/mcp.test.ts` (7: framing, split/coalesced/CRLF, incomplete trailing, server lifecycle, tool validation, error resilience) + `tests/lsp.test.ts` (5: Content-Length encode/decode, split/coalesced, extra headers, incomplete bodies, invalid lengths)
+- [x] phase gate → lint ok, test 156/156 (15 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities
+- [x] phase commit on `phase/8-mcp-lsp` → **pending**
+
+### Phase 9 — eval harness + seed tasks + npm packaging polish *(done)*
+- [x] `src/eval/types.ts`: `EvalTask`/`EvalRun`/`EvalCheck` types; tasks carry checks, setup, and optional tool/turn/budget overrides
+- [x] `src/eval/runner.ts`: `runEvalTask` runs the agent loop in a temp cwd, applies setup files, retries failing tasks, returns a structured `EvalRun`; `summarize` computes `pass@1` / `pass@N` and token totals
+- [x] `src/eval/tasks.ts`: check helpers (`contains`, `notContains`, `toolCalled`, `fileExists`, `stopReasonIs`, `passesChecks`), `task` factory, and `loadTasks` for JSON task directories
+- [x] `src/eval/seed/index.ts`: four seed tasks (`echo-ok`, `write-file`, `list-files`, `bash-gated`) exercising text checks, tool checks, and file checks
+- [x] `src/eval/index.ts`: barrel exports
+- [x] `src/cli/index.ts`: `jaa eval` command with `--provider`, `--model`, `--tasks`, `--retries`, `--json`; uses the default registry with bash gated off
+- [x] `tests/eval.test.ts` (5): passing task, retries, seed-task ids, summarize math, tool/file checks
+- [x] `package.json`: added `eval` script; `files` whitelist stays `dist`, `README.md`, `LICENSE`, `plan.md`
+- [x] `README.md`: eval harness section + packaging section
+- [x] `npm run pack:dry-run` → tarball contains only the four whitelisted entries (172 files, 102.4 kB)
+- [x] phase gate → lint ok, test 161/161 (16 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities
+- [x] phase commit on `phase/9-eval` → **pending**
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or

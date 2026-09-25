@@ -34,6 +34,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval": "node dist/cli/index.js eval",
     "pack:dryrun": "npm pack --dry-run"
   },
   "dependencies": {
