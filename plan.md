@@ -264,7 +264,8 @@ activity, and permission prompts that only exist by Phase 19.
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 129/129 tests (12 files incl. 23 new skills tests), 0 vulnerabilities, smoke `jaa skill list`/`--help`/ask `--no-skills` all green, Phase 6 gate complete → `phase/6-skills` committed as `8f40eaa`
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 144/144 tests (13 files, +15 agents tests), 0 vulnerabilities, smoke `jaa agent list`/`jaa agent show code-reviewer` all green, Phase 7 gate complete → `phase/7-subagents` committed as `69739e7`
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 156/156 tests (15 files, +12 MCP/LSP protocol tests), 0 vulnerabilities, smoke `jaa mcp serve --help`, `jaa lsp diagnose --help` all green, Phase 8 gate complete → `phase/8-mcp-lsp` committed as `cf1c8f9`
-| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 161/161 tests (16 files, +5 eval tests), 0 vulnerabilities, smoke `jaa eval --help` + `npm run pack:dry-run` (172 files, only dist/README/LICENSE/plan.md), Phase 9 gate complete → `phase/9-eval` committed as `aede7b0`
+| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 161/161 tests (16 files, +5 eval tests), 0 vulnerabilities, smoke `jaa eval --help` + `npm run pack:dry-run` (172 files, only dist/README/LICENSE/plan.md), Phase 9 gate complete → `phase/9-eval` committed as `aede7b0` |
+| 2026-09-25 | `npm run lint + CI=1 npm test + npm run build + npm audit --audit-level=high` | ok — 190/190 tests (17 files, +29 bench tests), 0 vulnerabilities. Phase 10 gate: `jaa bench --list` → 46 cases / 10 tags; live `jaa bench --tags debug --timeout 8000 --out <ndjson>` ran 7 cases end-to-end, all recorded as FAIL with `error: agent loop failed: fetch failed` (no local model reachable) and **no crash**; resume re-run added 0 duplicate rows. Baseline reads 0% only because no model was available on the host, not because of a code fault. Competitor parity numbers **not verified** — no competitor binary was invoked |
 | 2026-09-25 | `npm publish` + `npm install -g jaa-cli` + `jaa --version` | ok — `jaa-cli@0.1.0` live on npm (tarball 103 kB, 172 files, shasum `93f4d6bb…`), global bin at `%APPDATA%/npm/jaa`, `jaa --version` → `0.1.0`. Auth via `~/.npmrc` (`//registry.npmjs.org/:_authToken=...`); first token was read-only/2FA-gated (403), replaced with a publish-scoped bypass-2FA token |
 
 ## Phase log
@@ -508,36 +509,53 @@ union of four harnesses" is an assertion. With it, it is a number.
 **Why first:** it is the measuring stick for 11-20 and it reuses the Phase 9
 eval harness rather than replacing it.
 
-- [ ] `src/bench/types.ts` - `BenchCase` (task, setup, checks, budget, tags),
-      `BenchResult`, `HarnessAdapter`
-- [ ] `src/bench/runner.ts` - run one case against a harness in an isolated
-      worktree, capture transcript, tool calls, diff, wall time, tokens, cost,
-      and every check outcome
-- [ ] `src/bench/harnesses/jaa.ts` - in-process adapter (fast path)
-- [ ] `src/bench/harnesses/cli.ts` - generic external-CLI adapter: spawn a
-      competitor binary, feed the prompt, parse its output back. Works with
-      `claude`, `codex`, `opencode`, and `dsh` without importing any of them
-- [ ] `src/bench/tasks/` - at least 40 cases across tags: `edit`, `refactor`,
-      `debug`, `test-gen`, `multi-file`, `tool-use`, `long-context`,
-      `instruction-following`, `refusal`, `injection-resistance`
-- [ ] `src/bench/matrix.ts` - cross-product runner: cases x harnesses x models,
-      resumable, writes NDJSON incrementally so a crash never loses results
-- [ ] `src/bench/report.ts` - pass@1, pass@N, median turns, median wall time,
-      tokens, cost, and a per-tag breakdown; Markdown + JSON output
-- [ ] `src/cli/index.ts` - `jaa bench --harness jaa|claude|codex|opencode|dsh
-      --model <id> --tags <list> --repeat <n> --out <file>`
-- [ ] `tests/bench.test.ts` - matrix math, resumability, NDJSON append safety,
-      external-adapter timeout and malformed-output handling
-- [ ] `docs/benchmarks/RESULTS.md` - the first published parity table
+- [x] `src/bench/types.ts` - `BenchCase` (id, prompt, tags, checks, setup,
+      budget, timeout), `BenchResult`, `HarnessAdapter`, 10 declared tags
+- [x] `src/bench/checks.ts` - 20 check builders over transcript, work tree, and
+      tool calls (`fileExists`, `fileContains`, `fileAbsent`,
+      `fileLineCountAtLeast`, `finalContains`, `finalMatches`, `finalLacks`,
+      `toolCalled`, `notToolCalled`, `toolCalledAtLeast`, `turnsAtMost`,
+      `turnsAtLeast`, `touched`, `untouched`, `errored`, `noError`, `all`,
+      `any`, `caseOf`)
+- [x] `src/bench/cases.ts` - **46 cases** across all 10 tags, committed before
+      any result is recorded. 22 of 46 (48%) are tool-agnostic, above the
+      one-third floor, so the set cannot be tuned to flatter the tool layer
+- [x] `src/bench/runner.ts` - throwaway case directory, setup application,
+      before/after tree snapshot for `diffFiles`, hard per-case timeout that
+      converts a hang into a recorded error rather than a crash, and `cwd`
+      stripped from the result unless `keepWorkdir` is set
+- [x] `src/bench/harnesses/jaa.ts` - in-process adapter driving the real agent
+      loop with the default tool registry, bash gated off by default
+- [x] `src/bench/harnesses/cli.ts` - generic external-CLI adapter with
+      `{{prompt}}` / `{{cwd}}` / `{{model}}` templating, PATH availability
+      probe, output-size caps, SIGTERM then SIGKILL escalation, tolerant JSON
+      extraction, and a normalizer that maps each vendor's field names
+      (`result` / `output` / `text` / `finalText`, `input_tokens` /
+      `prompt_tokens`, ...). Presets for `claude`, `codex`, `opencode`, `dsh`
+- [x] `src/bench/matrix.ts` - cross-product runner, incremental NDJSON append
+      after every case, resume keyed on `caseId::harness::model`, tolerant of a
+      truncated trailing line from an interrupted run
+- [x] `src/bench/report.ts` - per-harness pass rate, median wall time, median
+      turns, token and cost totals, per-tag breakdown, Markdown and JSON
+- [x] `src/cli/index.ts` - `jaa bench --harness --provider --model --tags
+      --timeout --out --report --list --json --allow-bash`
+- [x] `tests/bench.test.ts` - 29 tests: every check builder, runner pass/fail/
+      timeout/error/skip, diff capture, work-dir retention, matrix cross
+      product, resume, NDJSON round-trip, truncated-line tolerance, report math,
+      empty-report safety, case-set invariants (unique ids, all tags covered,
+      tool-agnostic floor), external adapter availability, JSON parsing,
+      malformed-output handling, and the real jaa adapter
+- [ ] `docs/benchmarks/RESULTS.md` - the first published parity table.
+      **Blocked on a reachable model.** No local Ollama instance was running and
+      no provider key was supplied, so no honest pass rate exists yet. Run
+      `jaa bench --harness jaa,codex,claude --out results.ndjson --report
+      docs/benchmarks/RESULTS.md` on a machine with the binaries and a model
+      before claiming any parity claim
 
-**Gate:** `npm run lint` ok, tests ok, build ok, audit 0. `jaa bench --harness
-jaa --tags tool-use` runs end to end and writes a report. **Baseline recorded
-before Phase 11 starts.** Competitor binaries are optional; the matrix must
-degrade to jaa-only with a clear note, never error.
-
-**Risk:** benchmark tasks that flatter jaa's tool set. Mitigation: at least a
-third of cases must be tool-agnostic (plain instruction following and long
-context), and the task set is committed before any results are recorded.
+**Gate result:** lint 0, 190/190 tests, build 0, audit 0. `jaa bench --list`
+lists 46 cases across 10 tags. A live 7-case run completed with correct
+per-case error capture and no crash, and resume added no duplicate rows.
+**Parity numbers: not verified** — see the blocked item above.
 
 ---
 

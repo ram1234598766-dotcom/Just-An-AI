@@ -709,6 +709,124 @@ program
     );
   });
 
+// --- bench ----------------------------------------------------------------
+program
+  .command("bench")
+  .description("run the parity benchmark: the same cases through jaa and any installed reference harnesses")
+  .option("--harness <ids>", "comma-separated: jaa, claude, codex, opencode, dsh (default: jaa)")
+  .option("--provider <id>", "provider id for the jaa harness (defaults to settings defaultProvider, then ollama)")
+  .option("--model <model>", "model id for the jaa harness")
+  .option("--tags <list>", "comma-separated tags to include (default: all)")
+  .option("--limit <n>", "stop after n cases per harness (a spend guard)", parsePositiveInt)
+  .option("--timeout <ms>", "per-case timeout in milliseconds", parsePositiveInt)
+  .option("--out <file>", "NDJSON results file; also enables resume (already-recorded cases are skipped)")
+  .option("--report <file>", "write a Markdown report to this path")
+  .option("--list", "list the available cases and exit")
+  .option("--json", "emit the report as JSON instead of a table")
+  .option("--allow-bash", "let the jaa harness run shell commands (off by default)")
+  .action(
+    async (opts: {
+      harness?: string;
+      provider?: string;
+      model?: string;
+      tags?: string;
+      timeout?: number;
+      limit?: number;
+      out?: string;
+      report?: string;
+      list?: boolean;
+      json?: boolean;
+      allowBash?: boolean;
+    }) => {
+      const {
+        benchCases,
+        caseByTag,
+        buildReport,
+        toMarkdown,
+        runMatrix,
+        jaaHarness,
+        externalHarness,
+        BENCH_TAGS,
+      } = await import("../bench/index.js");
+
+      if (opts.list) {
+        for (const c of benchCases) {
+          console.log(`${c.id.padEnd(28)} ${c.tags.join(",")}`);
+        }
+        console.log(`\n${benchCases.length} cases across ${BENCH_TAGS.length} tags`);
+        return;
+      }
+
+      const tags = opts.tags ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
+      let cases = caseByTag(tags);
+      if (cases.length === 0) throw new Error(`no benchmark cases match tags: ${tags.join(",")}`);
+      if (opts.limit !== undefined && cases.length > opts.limit) {
+        console.error(`spend guard: limiting to ${opts.limit} of ${cases.length} cases`);
+        cases = cases.slice(0, opts.limit);
+      }
+
+      const requested = (opts.harness ?? "jaa")
+        .split(",")
+        .map((h) => h.trim())
+        .filter(Boolean);
+
+      const { defaultExternalTemplates } = await import("../bench/harnesses/cli.js");
+      const adapters = [];
+      // Record the model actually in use, not the literal flag value, so a
+      // report row is never labelled "default" when a real model was chosen.
+      let modelLabel = opts.model ?? "default";
+      for (const id of requested) {
+        if (id === "jaa") {
+          const modelInput: { provider?: string; model?: string } = {};
+          if (opts.provider !== undefined) modelInput.provider = opts.provider;
+          if (opts.model !== undefined) modelInput.model = opts.model;
+          const resolved = resolveModel(modelInput);
+          modelLabel = `${resolved.provider}/${resolved.model}`;
+          adapters.push(jaaHarness(resolved, { allowBash: opts.allowBash === true }));
+          continue;
+        }
+        const preset = defaultExternalTemplates[id];
+        if (!preset) {
+          throw new Error(
+            `unknown harness "${id}" (known: ${["jaa", ...Object.keys(defaultExternalTemplates)].join(", ")})`,
+          );
+        }
+        adapters.push(externalHarness({ id, bin: preset.bin, args: preset.args }));
+      }
+
+      const matrixOptions: Parameters<typeof runMatrix>[2] = {
+        model: modelLabel,
+      };
+      if (opts.timeout !== undefined) matrixOptions.timeoutMs = opts.timeout;
+      if (opts.out !== undefined) matrixOptions.resumeFrom = opts.out;
+      if (!opts.json) {
+        matrixOptions.onResult = (r) => {
+          if (r.skipped) {
+            console.error(`[SKIP] ${r.harness} ${r.caseId} - ${r.skipReason}`);
+          } else {
+            console.error(`[${r.pass ? "PASS" : "FAIL"}] ${r.harness} ${r.caseId}`);
+          }
+        };
+      }
+
+      const results = await runMatrix(cases, adapters, matrixOptions);
+      const report = buildReport(results);
+
+      if (opts.report) {
+        const { writeFileSync } = await import("node:fs");
+        writeFileSync(opts.report, toMarkdown(report), "utf8");
+        console.error(`report written to ${opts.report}`);
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify({ report, results }, null, 2));
+        return;
+      }
+
+      process.stdout.write(toMarkdown(report));
+    },
+  );
+
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(`jaa: ${err instanceof Error ? err.message : String(err)}`);
   process.exitCode = 1;

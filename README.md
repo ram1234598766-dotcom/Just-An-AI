@@ -43,6 +43,34 @@ jaa eval --tasks ./my-tasks    # JSON task files
 jaa eval --retries 2 --json    # machine-readable output
 ```
 
+## Bench harness
+
+`jaa bench` runs the same cases through jaa and any installed reference
+harnesses, so "better" is a number rather than a claim. 46 cases across 10
+tags: edit, refactor, debug, test-gen, multi-file, tool-use, long-context,
+instruction-following, refusal, injection-resistance.
+
+```bash
+jaa bench --list                        # list cases and tags
+jaa bench                               # all cases, jaa only
+jaa bench --tags debug,refusal          # filter by tag
+jaa bench --harness jaa,codex,claude    # cross-harness parity
+jaa bench --out results.ndjson          # persist + resume (skips recorded cases)
+jaa bench --report RESULTS.md           # write a Markdown report
+jaa bench --json                        # machine-readable
+```
+
+Competitor binaries are optional. `claude`, `codex`, `opencode`, and `dsh` are
+detected on PATH; a missing one is reported as **skipped**, never as a failure,
+and a matrix with only jaa still runs. Results stream to NDJSON after every
+case, so an interrupted run resumes where it stopped.
+
+Each case declares checks over the transcript, the work tree, and the tool
+calls: `fileExists`, `fileContains`, `fileAbsent`, `finalContains`,
+`finalMatches`, `toolCalled`, `notToolCalled`, `turnsAtMost`, `touched`,
+`untouched`, `noError`. Cases run in a throwaway directory that is removed
+afterwards, so a bad case cannot damage your repo.
+
 ## Quickstart
 
 ```bash
@@ -73,6 +101,7 @@ Precedence: process env > project `.env` > `~/.jaa/.env`. Local providers
 | `jaa mcp serve [--allow-bash]` | Expose jaa tools as an MCP stdio server |
 | `jaa lsp diagnose` | LSP diagnostics |
 | `jaa eval [options]` | Eval harness |
+| `jaa bench [options]` | Parity benchmark across harnesses |
 
 ## Tools
 
