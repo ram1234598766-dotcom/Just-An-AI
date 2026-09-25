@@ -18,7 +18,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | **done** |
 | 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | **done** |
 | 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | **done** |
-| 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | pending |
+| 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | **done** |
 | 8 | MCP client/server + LSP diagnostics (first cut) | `phase/8-mcp-lsp` | pending |
 | 9 | Eval harness + seed tasks + npm packaging polish | `phase/9-eval` | pending |
 | 10 | Head-to-head benchmark vs reference agents | `phase/10-bench` | **ON HOLD** (owner) |
@@ -109,6 +109,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | live Ollama context regression — `--ctx 2048` | **required on this machine**: bare llama3.2:3b fails at serve (`ggml CPU buffer 63.9 GB for KV cache`) with `OLLAMA_NUM_PARALLEL=8`; passing `options.num_ctx=2048` fixes it. Committed as `3520cda`
 
 | 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 129/129 tests (12 files incl. 23 new skills tests), 0 vulnerabilities, smoke `jaa skill list`/`--help`/ask `--no-skills` all green, Phase 6 gate complete → `phase/6-skills` committed as `8f40eaa`
+| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 144/144 tests (13 files, +15 agents tests), 0 vulnerabilities, smoke `jaa agent list`/`jaa agent show code-reviewer` all green, Phase 7 gate complete → `phase/7-subagents` committed as `69739e7`
 
 ## Phase log
 
@@ -215,7 +216,22 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] `src/tui/app.tsx`: system-prompt seeding fix (Phase 5 bug — `systemPrompt` prop was never injected into the ChatApp's message state for new chats → now seeded via `initialMessages`, fixing `onTurnEnd` delta calculation for `--save`); skill autotrigger per user message — `matchSkills` checks the prompt, matched skill names shown as an info line, skill body injected as an additional system message before the user's message
 - [x] tests → `tests/skills.test.ts` (23: frontmatter parsing incl. quotes/Windows-line-endings/unclosed/missing-name, parseSkill fallback, loadSkill/loadSkills with malformed/empty dirs, effectiveTriggers fallback, skillMatches case-insensitive, matchSkills multi-match/empty, skillContext delimiters/empty)
 - [x] phase gate → lint ok, test 129/129 (12 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities, smoke `jaa skill list`/`jaa skill --help`/`jaa ask --help` (shows `--no-skills`) all green
-- [x] phase commit on `phase/6-skills` → `8f40eaa`
+  - [x] phase commit on `phase/6-skills` → `8f40eaa`
+
+### Phase 7 — subagents + AGENTS.md project memory *(complete)*
+- [x] `src/agents/types.ts`: `AgentSpec` interface (name, description, ownership, deps, acceptance, instructions) + `ParsedAgents`
+- [x] `src/agents/parser.ts`: `parseAgents` (split on `## Subagents` heading, parse `###` subheadings with `- **Field**: value` bullets, handle multi-line continuation, Windows line endings, missing sections); `loadAgents` (read AGENTS.md from root), `findAgent`, `getAgentSpec`
+- [x] `src/agents/runner.ts`: `buildAgentSystemPrompt` (combines project context + agent name + instructions + default jaa identity), `runSubagent` (loads agent spec, builds system prompt, creates fresh tool registry with bash gated off by default, runs loop)
+- [x] `src/agents/index.ts`: barrel exports
+- [x] `src/cli/index.ts`: `jaa agent list|show|run <name> [task]` subcommands; run supports `-p/--provider`, `-m/--model`, `--system`, `--max-turns`, `--token-budget`, `--temperature`, `--ctx`, `--no-tools`
+- [x] `AGENTS.md` at repo root: project context (stack, conventions, security rules), 3 subagents (code-reviewer, test-writer, docs-updater) with ownership/deps/acceptance/instructions
+- [x] `src/tui/app.tsx`: system-prompt seeding fix — `initialMessages` now seeds `props.systemPrompt` as first message for new chats (Phase 5 bug: system prompt prop was passed but never injected into TUI message state, causing `onTurnEnd` delta calculation to be off for `--save` sessions). Tests still pass since `linesFromMessages` doesn't render system messages.
+- [x] tests → `tests/agents.test.ts` (15: frontmatter parsing incl. windows-line-endings/multi-line-instructions/unknown-fields/empty-sections/missing-section, loadAgents from filesystem, findAgent/getAgentSpec, system prompt construction)
+- [x] phase gate → lint ok, test 144/144 (13 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities, smoke `jaa agent list`/`jaa agent show code-reviewer` all green
+- [x] phase commit on `phase/7-subagents` → `69739e7`
+
+### Phase 8 — MCP client/server + LSP diagnostics (first cut) *(next)*
+### Phase 9 — eval harness + seed tasks + npm packaging polish
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
