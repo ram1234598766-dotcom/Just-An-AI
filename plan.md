@@ -16,7 +16,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2 | Provider adapters (openai-compatible, anthropic, gemini, ollama) + router | `phase/2-providers` | **done** |
 | 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | **done** |
 | 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | **done** |
-| 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | **in progress** |
+| 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | **done** |
 | 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | pending |
 | 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | pending |
 | 8 | MCP client/server + LSP diagnostics (first cut) | `phase/8-mcp-lsp` | pending |
@@ -108,7 +108,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `npm run lint` + `npm test` + `npm run build` (`--ctx` num_ctx feature) | ok — 88/88 (8 files, +4: loop numContext passthrough ×1, ollama num_ctx mapping ×2, mapping sanity ×1) |
 | 2026-09-24 | live Ollama context regression — `--ctx 2048` | **required on this machine**: bare llama3.2:3b fails at serve (`ggml CPU buffer 63.9 GB for KV cache`) with `OLLAMA_NUM_PARALLEL=8`; passing `options.num_ctx=2048` fixes it. Committed as `3520cda`
 
-> Final Phase 0 gate output gets pasted here before the phase commit.
+| 2026-09-24 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 106/106 tests (11 files), 0 vulnerabilities, Phase 5 gate complete → `phase/5-tui` committed as `bf16eb1`
 
 ## Phase log
 
@@ -169,7 +169,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] tests → done (23: registry advertising/unknown-tool/bad-JSON/zod-path/error-recovery, fs round-trip/traversal-escape/absolute-escape/`..\`-escape/list/stat/glob, globToRegExp no-slash-crossing, patch unique/atomic/ambiguous, bash gate + run, web scheme guard, git not-a-repo)
 - [x] phase gate: lint ok, test 84/84, build ok, smoke partial initially (qwen2.5-coder:7b text-tools) → **ok after re-verify** on `llama3.2:3b` (native tool calls, live 2-turn round-trip; see verification record) → committed on `phase/4-tools` (`1390502`)
 
-### Phase 5 — Ink TUI + non-interactive mode *(in progress)*
+### Phase 5 — Ink TUI + non-interactive mode *(complete)*
 
 - [x] `src/tui/app.tsx`: `ChatApp` Ink component — typed-input prompt (`❯`), idle hint
       (`type a message and press Enter · Ctrl+C to quit`), live transcript rendering
@@ -202,7 +202,8 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
       fires. The tests therefore `await delay(...)` between the text write and the
       `\r` write so each forms its own readable chunk. (In a real terminal this is
       not needed; it's a testing-library PassThrough artifact.)
-- [ ] phase gate → pending (lint + full test + build)
+  - [x] phase gate → lint ok, test 106/106 (11 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities, smoke `node dist/cli/index.js doctor` → all green, `startChat` renders via `jaa chat`
+  - [x] phase commit on `phase/5-tui` → `bf16eb1`
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
