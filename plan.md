@@ -17,7 +17,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 3 | Agent loop + context budgeting + sessions | `phase/3-loop` | **done** |
 | 4 | Tools (fs, patch, bash safe/ask, web, git) | `phase/4-tools` | **done** |
 | 5 | Ink TUI + `-p`/`--json` non-interactive mode | `phase/5-tui` | **done** |
-| 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | pending |
+| 6 | Skills (SKILL.md loader + autotrigger + GitHub install) | `phase/6-skills` | **done** |
 | 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | pending |
 | 8 | MCP client/server + LSP diagnostics (first cut) | `phase/8-mcp-lsp` | pending |
 | 9 | Eval harness + seed tasks + npm packaging polish | `phase/9-eval` | pending |
@@ -108,7 +108,7 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 2026-09-24 | `npm run lint` + `npm test` + `npm run build` (`--ctx` num_ctx feature) | ok — 88/88 (8 files, +4: loop numContext passthrough ×1, ollama num_ctx mapping ×2, mapping sanity ×1) |
 | 2026-09-24 | live Ollama context regression — `--ctx 2048` | **required on this machine**: bare llama3.2:3b fails at serve (`ggml CPU buffer 63.9 GB for KV cache`) with `OLLAMA_NUM_PARALLEL=8`; passing `options.num_ctx=2048` fixes it. Committed as `3520cda`
 
-| 2026-09-24 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 106/106 tests (11 files), 0 vulnerabilities, Phase 5 gate complete → `phase/5-tui` committed as `bf16eb1`
+| 2026-09-25 | `npm run lint + npm test + npm run build + npm audit --audit-level=high` | ok — 129/129 tests (12 files incl. 23 new skills tests), 0 vulnerabilities, smoke `jaa skill list`/`--help`/ask `--no-skills` all green, Phase 6 gate complete → `phase/6-skills` committed as `8f40eaa`
 
 ## Phase log
 
@@ -204,6 +204,18 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
       not needed; it's a testing-library PassThrough artifact.)
   - [x] phase gate → lint ok, test 106/106 (11 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities, smoke `node dist/cli/index.js doctor` → all green, `startChat` renders via `jaa chat`
   - [x] phase commit on `phase/5-tui` → `bf16eb1`
+
+### Phase 6 — skills (SKILL.md loader + autotrigger + GitHub install) *(complete)*
+- [x] `src/skills/types.ts`: `Skill` interface (id, name, description, triggers, body, path) + `ParsedFrontmatter`
+- [x] `src/skills/loader.ts`: `parseFrontmatter` (minimal YAML parser for name/description/triggers), `parseSkill`, `loadSkill`, `loadSkills`, `ensureSkillsDir`
+- [x] `src/skills/match.ts`: `effectiveTriggers` (explicit triggers or skill name fallback), `skillMatches` (case-insensitive substring), `matchSkills`, `skillContext` (delimited system-prompt injection string)
+- [x] `src/skills/install.ts`: `installFromGitHub` (`git clone --depth 1` → verify SKILL.md exists, cleanup on failure), `installFromUrl` (fetch raw file → save as `<id>/SKILL.md`), `removeSkill`, `listSkillIds`
+- [x] `src/skills/index.ts`: barrel exports
+- [x] `src/cli/index.ts`: `jaa skill list|install|remove` subcommands; `--no-skills` flag on both `ask` and `chat` to disable autotrigger; `ask` autotrigger injects matched skill context into the system prompt before the loop
+- [x] `src/tui/app.tsx`: system-prompt seeding fix (Phase 5 bug — `systemPrompt` prop was never injected into the ChatApp's message state for new chats → now seeded via `initialMessages`, fixing `onTurnEnd` delta calculation for `--save`); skill autotrigger per user message — `matchSkills` checks the prompt, matched skill names shown as an info line, skill body injected as an additional system message before the user's message
+- [x] tests → `tests/skills.test.ts` (23: frontmatter parsing incl. quotes/Windows-line-endings/unclosed/missing-name, parseSkill fallback, loadSkill/loadSkills with malformed/empty dirs, effectiveTriggers fallback, skillMatches case-insensitive, matchSkills multi-match/empty, skillContext delimiters/empty)
+- [x] phase gate → lint ok, test 129/129 (12 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities, smoke `jaa skill list`/`jaa skill --help`/`jaa ask --help` (shows `--no-skills`) all green
+- [x] phase commit on `phase/6-skills` → `8f40eaa`
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
