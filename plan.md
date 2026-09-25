@@ -44,8 +44,8 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | Multi-provider routing | no | no | yes | yes | yes -- **wins** |
 | MIT / open source | no (CLI only) | Apache-2.0 | MIT | MIT | MIT -- ties |
 | Hooks (lifecycle events) | yes (10) | yes (9) | plugin events | yes (7) | **no** |
-| OS-level sandbox | Seatbelt/bwrap | Landlock+seccomp | pluggable | Docker | **partial** (path check) |
-| Permission model | allow/deny/ask/defer | 3 policies x 3 modes | guard + monotonic deny | rule-based | **partial** (1 boolean) |
+| OS-level sandbox | Seatbelt/bwrap | Landlock+seccomp | pluggable | Docker | **partial** (Seatbelt/bwrap; none on Windows) |
+| Permission model | allow/deny/ask/defer | 3 policies x 3 modes | guard + monotonic deny | rule-based | **yes** (allow/deny/ask, 3 modes, deny-absolute) |
 | Multi-agent | subagents + teams + workflows | 6 threads, depth, CSV fan-out | subagents + workflows | sessions | **partial** (1 sync agent) |
 | Worktree isolation | yes | yes | -- | -- | **no** |
 | Checkpoint / rewind | yes (Esc Esc) | fork + worktree | -- | snapshots | **no** |
@@ -110,9 +110,9 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | 7 | Subagents + AGENTS.md project memory | `69739e7` | **done** |
 | 8 | MCP client/server + LSP diagnostics (protocol-correct) | `cf1c8f9` | **done** |
 | 9 | Eval harness + seed tasks + npm packaging polish | `aede7b0` | **done** |
-| 10 | Benchmark + parity harness (the measuring stick) | `f8b6928` | **next** |
+| 10 | Benchmark + parity harness (the measuring stick) | `f8b6928` | **done, unmeasured** (parity blocked, no model) |
 | 11 | Permission system (allow/deny/ask/defer + rules) | `09cb41f` | **done** |
-| 12 | OS-level sandbox (Seatbelt / Landlock / Job Objects) | - | planned |
+| 12 | OS-level sandbox (Seatbelt / bubblewrap) | `de3ce22` | **done on macOS + Linux, none on Windows** (4 open gaps) |
 | 13 | Hooks (lifecycle events + blocking decisions) | - | planned |
 | 14 | Checkpoint, rewind and fork | - | planned |
 | 15 | Multi-agent orchestration (parallel + worktrees + background) | - | planned |
@@ -146,6 +146,24 @@ activity, and permission prompts that only exist by Phase 19.
 
 ## Decisions (dated)
 
+- **2026-09-25 — Phase 12 shipped a smaller scope than planned, deliberately.**
+  The plan called for `src/sandbox/darwin.ts`, `src/sandbox/linux.ts`
+  (Landlock + seccomp) and `src/sandbox/win32.ts` (Job Objects + ACL guard).
+  Only the macOS and Linux mechanisms were built, as
+  `src/sandbox/generate.ts` + `detect.ts` + `apply.ts`.
+  - *Landlock/seccomp dropped:* both need a compiled helper or a native addon.
+    bubblewrap gives the same filesystem, network and PID-namespace guarantees
+    with no build step, and a stub that reported Landlock without enforcing it
+    would be worse than not having it. `wrapCommand` now **refuses** a `landlock`
+    request rather than silently substituting bubblewrap and discarding the
+    rules the caller wrote.
+  - *Win32 Job Objects dropped:* a native binding would make `jaa`
+    un-installable without a toolchain, which contradicts the one-command
+    install that is the product's front door. Recording the gap (G1) beats
+    shipping a claimed boundary.
+  This is recorded as a decision rather than left as a silent omission, because
+  the difference between "not built yet" and "not going to be built" matters to
+  whoever picks this up next.
 - **2026-09-25 — Single branch: `main` only.** The owner directed that all work
   commit and push straight to `main`, with no feature branches. The six
   `phase/*` branches (0 through 11) were already fully merged and have been
@@ -670,15 +688,19 @@ softened:
 - [x] `tests/tools.test.ts` - every git tool exercised against a real repository,
       plus `core.fsmonitor` and diff-driver execution controls
 
-**Gate (macOS/Linux):** a command that writes outside the declared roots fails,
-and a network call under `network: false` fails. **Not yet executed** -- this
-host is Windows, so the Seatbelt and bubblewrap runtime gates are unverified.
-Policy generation, argument construction, validation and the fail-closed path
-are verified here. See BLOCKED.
+**Gate (macOS/Linux) -- NOT YET RUN. This is the single most important thing left
+unverified in this phase.** The macOS/Linux runtime gate is: a command that
+writes outside the declared roots fails, and a network call under
+`network: false` fails. This host is Windows, so neither was executed. What *was*
+verified here is the pure logic: policy validation, argument construction, mount
+ordering, env handling, the fail-closed path, the live git exploit controls, and
+that `doctor` reports the truth. Argument generation being correct is not the
+same as confinement working, and this plan does not claim it is.
 
-**Gate (this host, Windows):** `npm run lint` 0; 321/321 tests; `npm run build`
-clean; `npm audit --audit-level=high` 0 vulnerabilities. `jaa doctor` reports the
-sandbox as unavailable with the reason, and `bash` refuses under `require`.
+**Gate (this host, Windows) -- run and passing:** `npm run lint` 0 errors;
+321/321 tests across 19 files; `npm run build` clean; `npm audit
+--audit-level=high` 0 vulnerabilities. `jaa doctor` reports the sandbox
+unavailable with the reason, and `bash` refuses under `require`.
 
 **Two independent security reviews were run and their findings fixed**, not
 waived. The first found a repository-local `git diff` command-driver RCE and a
@@ -696,11 +718,45 @@ than a hand-written stand-in, the probe result is memoised, a policy that would
 grant the whole filesystem is refused, and an unavailable primitive downgrades
 to an explicit refusal or a visible warning rather than a lie.
 
-**Known limits, stated rather than hidden:** on Linux the parent environment is
-cleared and rebuilt from the passthrough list, but passthrough *values* appear
-in the child `bwrap` argv and are therefore visible to a process listing of the
-same user. Fixing that needs a different transport. On macOS the Seatbelt
-system-read list has not been validated on real hardware.
+#### Open gaps carried out of Phase 12
+
+These are real and unresolved. None is closed by the fact that the code landed.
+
+- [ ] **G1 -- No sandbox on Windows.** `bash` refuses unless `--no-sandbox` is
+      passed, which runs it unisolated. Job Objects need a native Node binding
+      that would make `jaa` un-installable without a build toolchain. Options,
+      none chosen: ship a prebuilt optional native addon; shell out to WSL; or
+      document container/VM as the Windows answer. **Owner decision required**,
+      because each option changes the install story.
+- [ ] **G2 -- macOS/Linux runtime gate never executed.** Needs one run of the
+      Phase 12 gate on a real macOS host and one on a real Linux host. Until then
+      the sandbox is *believed* to confine, with correct argv and a fail-closed
+      path, but confinement itself is unproven. Highest-priority gap: every other
+      item here is a narrowing of a working boundary, whereas this one is the
+      boundary.
+- [ ] **G3 -- Linux env passthrough values are visible in child argv.**
+      `--setenv NAME value` puts the value in the `bwrap` command line, so a
+      process listing by the same user can read it. `--clearenv` is in place, so
+      the *set* of variables is correct; only the visibility of the values is
+      wrong. Fixing it needs a different transport (inherit-then-clear in a
+      wrapper, or an fd-based handoff), not a flag change.
+- [ ] **G4 -- macOS Seatbelt system-read list unvalidated on real hardware.**
+      `/etc` and `/private/etc` are absent from `SYSTEM_READ_PATHS`. On macOS
+      `/etc` is a symlink into `/private/etc`, and if the SBPL `subpath` filter
+      does not canonicalise, every process opening `/etc/...` is denied -- which
+      would break large parts of the toolchain. Cannot be tested without a Mac.
+      Also note `SYSTEM_READ_PATHS` and the Linux `SYSTEM_ROOTS` are two separate
+      lists, so the two platforms grant different trees and can drift.
+- [ ] **G5 -- `core.fsmonitor=false` and `--no-ext-diff` are a deny-list.**
+      They close the two git code-execution routes that are known today. A git
+      config key nobody has thought of would reopen the class, which is why
+      `git_diff` is gated like `bash` and why `doctor` says "hardened but
+      unisolated" rather than "sandboxed". Only a true sandbox with no
+      attacker-writable `.git` removes the need for the deny-list.
+
+**Also carried forward:** the `git` tools are `best-effort` by design, so on
+Windows they run unisolated *today*, mitigated only by G5's deny-list. That is a
+known, accepted, and documented exposure, not an oversight.
 
 ---
 

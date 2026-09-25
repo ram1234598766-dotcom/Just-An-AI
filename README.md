@@ -15,8 +15,11 @@ measurable bar (`jaa eval`) so "better" is tested, not claimed.
 
 ## Status
 
-Production. All phases 0-9 complete and gated; published to npm as `jaa-cli@0.1.0`.
-Phase 10 (head-to-head benchmark) is on hold with the owner. See `plan.md`.
+Published to npm as `jaa-cli@0.1.0`. Phases 0-11 complete and gated. Phase 12
+(OS sandbox) is built for macOS and Linux; **Windows has no sandbox** and
+`bash` refuses there unless you pass `--no-sandbox`. Phase 10's parity numbers
+are still unmeasured because no model was reachable. See `plan.md` for the
+status board and the open gaps.
 
 ## Node
 
