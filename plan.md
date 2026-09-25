@@ -1,11 +1,100 @@
-# jaa — plan & progress
+# jaa - plan & progress
 
 > Living tracker. One entry per phase. Gates are run for real and pasted, never assumed.
 
 ## North star
+
 A local-first, multi-provider terminal coding agent shipped as the npm package
 `jaa-cli` (bin: `jaa`). Bring your own key from any provider, or run fully local
 on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
+
+**The bar:** jaa must be strictly better than the *union* of Claude Code, OpenAI
+Codex CLI, DeepSeek Harness (`dsh`), and opencode taken together -- not better
+than any one of them. That means it must adopt every capability any of them
+ships well, keep the two advantages it already has, and add the one thing none
+of them have.
+
+## The thesis
+
+Three claims define the product. Everything in the roadmap serves one of them.
+
+1. **Provider freedom is table stakes, not a feature.** Claude Code is
+   Anthropic-only. Codex is OpenAI-only. opencode and jaa accept any provider.
+   jaa keeps this and extends it (OAuth subscription auth, reasoning-effort
+   control, OpenAI Responses API, prompt caching).
+2. **Compatibility is the real moat.** Every team already has `CLAUDE.md`,
+   `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.mcp.json`, and a `config.toml`
+   with MCP servers in it. jaa reads all of them, writes all of them, and runs
+   as an MCP server inside the others. Switching to jaa must cost zero
+   reconfiguration. No competitor does this.
+3. **Measured, not claimed.** Phase 10 is a benchmark harness, not a feature.
+   "Better" is a number produced by running the same tasks through jaa and the
+   reference harnesses. Phases 11-20 are gated on moving that number.
+
+## Competitive position (as of 2026-09-25)
+
+Legend: `yes` = ships today, `partial` = exists but materially behind,
+`no` = absent. Sources: vendor docs for each project, cross-checked against a
+third-party integration survey (Calyx, Sep 2026) that pins exact versions.
+
+| Capability | Claude Code 2.1.x | Codex 0.151 | DeepSeek dsh | opencode 1.18 | jaa 0.1.0 |
+|---|---|---|---|---|---|
+| Providers | Anthropic only | OpenAI only | any (plugin) | 75+ | 10 -- **wins** |
+| Local models (Ollama) | no | `--oss` only | any | yes | yes -- **wins** |
+| Multi-provider routing | no | no | yes | yes | yes -- **wins** |
+| MIT / open source | no (CLI only) | Apache-2.0 | MIT | MIT | MIT -- ties |
+| Hooks (lifecycle events) | yes (10) | yes (9) | plugin events | yes (7) | **no** |
+| OS-level sandbox | Seatbelt/bwrap | Landlock+seccomp | pluggable | Docker | **partial** (path check) |
+| Permission model | allow/deny/ask/defer | 3 policies x 3 modes | guard + monotonic deny | rule-based | **partial** (1 boolean) |
+| Multi-agent | subagents + teams + workflows | 6 threads, depth, CSV fan-out | subagents + workflows | sessions | **partial** (1 sync agent) |
+| Worktree isolation | yes | yes | -- | -- | **no** |
+| Checkpoint / rewind | yes (Esc Esc) | fork + worktree | -- | snapshots | **no** |
+| Compaction | summarize ~95% | model-native | plugin | summarize ~90% | **partial** (truncate) |
+| Live LSP in the loop | yes | via MCP | -- | 30+ auto | **partial** (manual) |
+| Plugin packaging | marketplaces | 90+ plugins | everything-is-plugin | plugin array | **no** |
+| Code Mode (TS orchestrator) | -- | -- | yes | -- | **no** |
+| Cross-harness config read | CLAUDE.md | AGENTS.md | AGENTS.md | AGENTS.md | AGENTS.md only |
+| Cross-harness config write | -- | -- | -- | -- | **no** |
+| Headless JSON mode | `-p` | `exec --output json` | SDK / JSON-RPC | `run` | `ask --json` |
+| Background / scheduled | durable cron, wakeup | persisted goals, queue | jobs | background bash | **no** |
+| TUI depth | strong | strong (Rust) | web UI | strong (Go) | **partial** (basic Ink) |
+
+### What jaa already wins, and must not lose
+
+- **Provider freedom.** 10 providers behind one interface, including the entire
+  OpenAI-compatible family via `baseURL`. Neither Claude Code nor Codex can do
+  this. This is the exit ramp from any vendor's pricing.
+- **Local-first with real tools.** Ollama works end-to-end with native tool
+  calls, not just chat. Verified live against `llama3.2:3b`.
+- **Auditable from source.** MIT, ~4.4k lines of strict TypeScript, 161 tests.
+  Read the whole agent in an afternoon. Claude Code is closed.
+- **Eval harness in the box.** `jaa eval` ships with pass@1 / pass@N and token
+  accounting. Most competitors measure you externally; jaa measures itself.
+
+### Where jaa is behind, ranked by how much it would cost to lose a user
+
+1. **No real permission model.** One boolean (`allowBash`). Codex has 9
+   combinations, Claude Code has 4 decisions plus rule files. A user who works
+   on a production repo cannot use jaa safely today. This is the adoption
+   blocker.
+2. **No OS-level sandbox.** `confinePath` validates paths; it does not contain
+   a process. Once `allowBash` is true, every command runs with full user
+   privileges. Codex uses Landlock + seccomp; Claude Code uses Seatbelt. This is
+   the trust blocker.
+3. **No hooks.** All four competitors have them. It is how a team enforces
+   policy, runs linters on edit, and blocks dangerous commands. Its absence
+   makes jaa unusable in a team setting.
+4. **Multi-agent is single-threaded.** `jaa agent run` is one synchronous agent
+   with no parallelism, no worktree isolation, no background execution. This is
+   the capability gap.
+5. **No rewind.** No checkpoints means no safe experimentation. Every
+   competitor has some form.
+6. **TUI is shallow.** No multi-pane, no agent dashboard, no typed tool cards,
+   no themes or keybinds. The most visible surface is the least developed.
+7. **No plugin packaging.** Skills and subagents exist but cannot be bundled
+   and distributed as one installable unit with hooks and MCP servers.
+8. **LSP is manual.** `jaa lsp diagnose` is a one-shot command. Competitors
+   feed diagnostics into the loop after every edit.
 
 ## Status board
 
@@ -21,11 +110,75 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 | 7 | Subagents + AGENTS.md project memory | `phase/7-subagents` | **done** |
 | 8 | MCP client/server + LSP diagnostics (protocol-correct) | `phase/8-mcp-lsp` | **done** |
 | 9 | Eval harness + seed tasks + npm packaging polish | `phase/9-eval` | **done** |
-| 10 | Head-to-head benchmark vs reference agents | `phase/10-bench` | **ON HOLD** (owner) |
+| 10 | Benchmark + parity harness (the measuring stick) | `phase/10-bench` | **next** |
+| 11 | Permission system (allow/deny/ask/defer + rules) | `phase/11-permissions` | planned |
+| 12 | OS-level sandbox (Seatbelt / Landlock / Job Objects) | `phase/12-sandbox` | planned |
+| 13 | Hooks (lifecycle events + blocking decisions) | `phase/13-hooks` | planned |
+| 14 | Checkpoint, rewind and fork | `phase/14-checkpoint` | planned |
+| 15 | Multi-agent orchestration (parallel + worktrees + background) | `phase/15-multiagent` | planned |
+| 16 | Compaction and persistent memory | `phase/16-compaction` | planned |
+| 17 | Live code intelligence (LSP in the loop) | `phase/17-lsp-loop` | planned |
+| 18 | Compatibility and interop layer | `phase/18-compat` | planned |
+| 19 | Plugin system and registry | `phase/19-plugins` | planned |
+| 20 | TUI overhaul (multi-pane, tool cards, dashboard) | `phase/20-tui` | planned |
+
+### Dependency order
+
+```
+10 benchmark
+  |
+  +-- 11 permissions  --> 12 sandbox  --> 13 hooks
+                                  |
+  +-- 14 checkpoint ---------------+--> 15 multi-agent
+                                              |
+  +-- 16 compaction                            |
+  +-- 17 lsp-loop                             |
+  +-- 18 compat                               |
+  +-- 19 plugins ------------------------------+
+  +-- 20 tui (renders everything above it) <----+
+```
+
+Rationale: permissions before sandbox (the sandbox is what permissions toggle),
+permissions before hooks (a `PreToolUse` hook returns a permission decision),
+checkpoint before multi-agent (worktree isolation and rewind share the same
+snapshot machinery), and TUI last so it can render diagnostics, subagent
+activity, and permission prompts that only exist by Phase 19.
 
 ## Decisions (dated)
 
-- **2026-09-24 — Package name:** publish as `jaa-cli` (free on npm; `jaa` is
+- **2026-09-25 — Competitive bar set:** jaa must beat the *union* of Claude Code,
+  Codex CLI, DeepSeek Harness, and opencode, not any one of them. Phases 11-20
+  are the competitive core; anything outside it is listed under "Deferred past
+  Phase 20" rather than silently dropped.
+- **2026-09-25 — Benchmark before features:** Phase 10 lands before Phase 11 so
+  every later phase can be gated on a movement in a measured number. The task
+  set is committed before any result is recorded, to stop the benchmark being
+  tuned to flatter jaa.
+- **2026-09-25 — Dependency order is fixed:** permissions (11) before sandbox
+  (12) before hooks (13); checkpoint (14) before multi-agent (15); TUI (20)
+  last so it can render what the earlier phases produce. Reordering breaks
+  stated preconditions.
+- **2026-09-25 — Compatibility is the moat, not a feature:** jaa reads
+  `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules/*.mdc`,
+  `.windsurfrules`, `.github/copilot-instructions.md`, `.mcp.json`,
+  `~/.codex/config.toml`, and `opencode.json`; and writes `AGENTS.md`,
+  `CLAUDE.md`, and `.mcp.json`. Full matrix above.
+- **2026-09-25 — Never execute foreign plugin code silently:** `.opencode/plugins/*.js`
+  and plugin-provided hooks are *listed* in `jaa doctor`, never evaluated during
+  detection. Installing executable content requires explicit confirmation, and
+  plugin tools are subject to the same permission engine and sandbox as
+  built-ins.
+- **2026-09-25 — Never clobber another tool's config:** jaa writes only files it
+  created, tracked in `.jaa/compat-manifest.json`. `AGENTS.md` and `CLAUDE.md`
+  need `--force` to overwrite. Every other export is stdout only.
+- **2026-09-25 — Platform honesty over platform claims:** if an OS sandbox
+  primitive is unavailable, `jaa doctor` says so with the reason and the
+  affected guarantee. Windows has no Seatbelt equivalent, so its containment is
+  documented as Job Objects plus an ACL guard, not as equivalent isolation.
+- **2026-09-25 — Conservative multi-agent defaults:** `max_depth` defaults to 1
+  and `max_threads` to 6, matching Codex's guidance that deeper recursion turns
+  broad delegation into repeated expensive fan-out. Fan-out is opt-in.
+- **2026-09-25 — Package name:** publish as `jaa-cli` (free on npm; `jaa` is
   squatted by an empty `0.0.0`). Bin command stays `jaa`. Scoped
   `@mrityunjay/jaa` is the fallback.
 - **2026-09-24 — Ecosystem:** TypeScript + Node 26, npm distribution. Verified:
@@ -260,6 +413,593 @@ on Ollama. Every phase gates on `npm run lint` + `npm test` + `npm run build`.
 - [x] `npm run pack:dry-run` → tarball contains only the four whitelisted entries (172 files, 102.4 kB)
 - [x] phase gate → lint ok, test 161/161 (16 files), build ok, `npm audit --audit-level=high` → 0 vulnerabilities
 - [x] phase commit on `phase/9-eval` → **pending**
+
+## Compatibility and interop matrix
+
+The single differentiator. jaa must adopt a repository that is already
+configured for other harnesses, and be adoptable by teams already using jaa.
+
+### Read (import) -- jaa consumes these on startup
+
+| Source | Format | Consumed as | Notes |
+|---|---|---|---|
+| `AGENTS.md` (repo root) | Markdown | project memory + subagents | Universal standard. Codex, opencode, DeepSeek all read it. Already supported. |
+| `~/.codex/AGENTS.md` | Markdown | global project memory | Codex global layer. Precedence below repo `AGENTS.md`. |
+| `CLAUDE.md` | Markdown | project memory | Claude Code. Merged below `AGENTS.md` when both exist. |
+| `CLAUDE.local.md` | Markdown | local project memory | Gitignored Claude override layer. |
+| `GEMINI.md` | Markdown | project memory | Gemini CLI. |
+| `.cursorrules` | Plain text | project memory | Legacy Cursor. |
+| `.cursor/rules/*.mdc` | Markdown + frontmatter | project memory (per-glob) | Modern Cursor rules. Each file scoped to its glob. |
+| `.windsurfrules` | Markdown | project memory | Windsurf. |
+| `.github/copilot-instructions.md` | Markdown | project memory | GitHub Copilot. |
+| `.claude/skills/*/SKILL.md` | Frontmatter + Markdown | skills | Identical format to jaa skills. Zero conversion. |
+| `.claude/agents/*.md` | Frontmatter + Markdown | subagents | `name`, `description`, `tools`, `model` mapped. |
+| `.claude/commands/*.md` | Markdown | skills | Flat command files map to skills. |
+| `.claude/settings.json` | JSON | permission rules + hook hints | `permissions.allow` / `.deny` translated. |
+| `.mcp.json` | JSON | MCP servers | Claude Code project-scoped MCP. `mcpServers` map to jaa clients. |
+| `~/.codex/config.toml` | TOML | MCP servers + model defaults | Parse `[mcp_servers.*]`, `model`, `sandbox_mode`. |
+| `~/.config/opencode/opencode.json` | JSON | MCP servers + plugins + instructions | `mcp`, `plugin`, `instructions` mapped. |
+| `opencode.json` (project) | JSON | same, project layer | Merged below the global layer. |
+| `.opencode/plugins/*.js` | JavaScript | *not executed* | Listed in `jaa doctor` as detected-but-unsupported. Never eval foreign code. |
+| `pyproject.toml` / `package.json` | TOML / JSON | project-type detection + test command | Feeds `jaa doctor` and the benchmark runner. |
+
+Precedence, highest first: `jaa` native `AGENTS.md` section > `AGENTS.md` >
+`CLAUDE.md` > `GEMINI.md` > `.cursor/rules/*.mdc` > `.cursorrules` >
+`.windsurfrules` > `.github/copilot-instructions.md`. Every source is
+attributed in `jaa doctor` so the user can see exactly what was loaded and from
+where. No source is ever silently rewritten.
+
+### Write (export) -- jaa emits these
+
+| Target | Command | Contents |
+|---|---|---|
+| `AGENTS.md` | `jaa compat sync` | Generated project memory: stack detection, conventions, build/test/lint commands, subagent index. Written only when the file is absent or `--force` is passed. Never clobbers hand-written prose. |
+| `CLAUDE.md` | `jaa compat sync` | Pointer file to `AGENTS.md` plus a Claude-specific header, so Claude Code picks up jaa's context without duplication. |
+| `.mcp.json` | `jaa compat sync` | Registers `jaa mcp serve` as an MCP server, so Claude Code can call jaa's tools. |
+| `opencode.json` snippet | `jaa compat print opencode` | Printed to stdout, never written silently. |
+| `config.toml` snippet | `jaa compat print codex` | `[mcp_servers.jaa]` table for Codex. Printed, never written silently. |
+| `.jaa/config.json` | native | Canonical jaa settings. Source of truth. |
+
+Hard rule: **jaa never writes to a file it did not create, except `AGENTS.md`
+and `CLAUDE.md` with an explicit `--force`.** Every other export is stdout.
+
+### Export surfaces -- other tools consume jaa
+
+| Surface | Command | Consumed by |
+|---|---|---|
+| MCP stdio server | `jaa mcp serve` | Claude Code, Codex, opencode, DeepSeek, any MCP client |
+| Headless JSON | `jaa ask -p "<q>" --json` | Scripts, CI, editor integrations |
+| Codex-compatible JSON | `jaa exec --output json` | Drop-in for `codex exec --output json` consumers |
+| Stream JSON | `jaa exec --output stream-json` | Live UIs; one JSON object per event |
+| Exit codes | `jaa exec` | CI: `0` pass, `1` agent error, `2` permission denied, `3` budget exceeded |
+| Skill directory | `~/.jaa/skills/` | Symlinked or copied by other harnesses (SKILL.md is a shared standard) |
+| Subagent definitions | `jaa agent export` | Emits `.claude/agents/*.md` and `.codex/agents/*.toml` |
+
+### The acceptance test for Phase 18
+
+A repository containing all of `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
+`.cursorrules`, `.cursor/rules/style.mdc`, `.mcp.json`, and a
+`~/.codex/config.toml` with two MCP servers must, with zero jaa-specific
+configuration:
+
+1. `jaa doctor` report every detected source with its path and precedence rank.
+2. `jaa ask` have all of the project memory in context.
+3. `jaa ask` have both MCP servers' tools available.
+4. `jaa compat sync` create `CLAUDE.md` and `.mcp.json` that make Claude Code
+   able to call `jaa mcp serve`.
+5. `jaa eval` run without configuration errors.
+
+A test fixture repository encoding all of those files is a required Phase 18
+deliverable, with a test per numbered assertion.
+
+## Roadmap phase specs (10-20)
+
+Each phase lists the gap it closes, concrete deliverables, the gate that must
+pass, and what could regress. No phase is "done" until its gate output is
+pasted into the verification record above.
+
+---
+
+### Phase 10 - Benchmark and parity harness
+
+**Gap closed:** every other phase in this roadmap. Without it, "better than the
+union of four harnesses" is an assertion. With it, it is a number.
+
+**Why first:** it is the measuring stick for 11-20 and it reuses the Phase 9
+eval harness rather than replacing it.
+
+- [ ] `src/bench/types.ts` - `BenchCase` (task, setup, checks, budget, tags),
+      `BenchResult`, `HarnessAdapter`
+- [ ] `src/bench/runner.ts` - run one case against a harness in an isolated
+      worktree, capture transcript, tool calls, diff, wall time, tokens, cost,
+      and every check outcome
+- [ ] `src/bench/harnesses/jaa.ts` - in-process adapter (fast path)
+- [ ] `src/bench/harnesses/cli.ts` - generic external-CLI adapter: spawn a
+      competitor binary, feed the prompt, parse its output back. Works with
+      `claude`, `codex`, `opencode`, and `dsh` without importing any of them
+- [ ] `src/bench/tasks/` - at least 40 cases across tags: `edit`, `refactor`,
+      `debug`, `test-gen`, `multi-file`, `tool-use`, `long-context`,
+      `instruction-following`, `refusal`, `injection-resistance`
+- [ ] `src/bench/matrix.ts` - cross-product runner: cases x harnesses x models,
+      resumable, writes NDJSON incrementally so a crash never loses results
+- [ ] `src/bench/report.ts` - pass@1, pass@N, median turns, median wall time,
+      tokens, cost, and a per-tag breakdown; Markdown + JSON output
+- [ ] `src/cli/index.ts` - `jaa bench --harness jaa|claude|codex|opencode|dsh
+      --model <id> --tags <list> --repeat <n> --out <file>`
+- [ ] `tests/bench.test.ts` - matrix math, resumability, NDJSON append safety,
+      external-adapter timeout and malformed-output handling
+- [ ] `docs/benchmarks/RESULTS.md` - the first published parity table
+
+**Gate:** `npm run lint` ok, tests ok, build ok, audit 0. `jaa bench --harness
+jaa --tags tool-use` runs end to end and writes a report. **Baseline recorded
+before Phase 11 starts.** Competitor binaries are optional; the matrix must
+degrade to jaa-only with a clear note, never error.
+
+**Risk:** benchmark tasks that flatter jaa's tool set. Mitigation: at least a
+third of cases must be tool-agnostic (plain instruction following and long
+context), and the task set is committed before any results are recorded.
+
+---
+
+### Phase 11 - Permission system
+
+**Gap closed:** ranked #1 adoption blocker. One boolean becomes a real model.
+
+**Competitor parity:** Codex 3 approval policies x 3 sandbox modes; Claude Code
+allow/deny/ask/defer plus rule files; DeepSeek a monotonic deny guard layered
+over allow/deny/ask.
+
+- [ ] `src/permissions/types.ts` - `Decision` (`allow` | `deny` | `ask` |
+      `defer`), `Rule`, `RuleMatch`, `PermissionRequest`, `PermissionOutcome`
+- [ ] `src/permissions/rules.ts` - layered rules, highest-specificity-wins:
+      exact tool name > tool glob > command prefix > path glob > catch-all.
+      Import `.claude/settings.json` `permissions.allow` / `.deny`
+- [ ] `src/permissions/engine.ts` - `evaluate(request, rules)` returning a
+      decision plus the rule that produced it (always reportable, never opaque)
+- [ ] `src/permissions/ask.ts` - non-TTY path: no interactive prompt available,
+      so `ask` degrades to `deny` with a machine-readable reason rather than
+      hanging or silently allowing
+- [ ] `src/permissions/prompt.ts` - TTY path: one-shot y/n/a(llways)/d(eny)
+      with session-scoped "always allow this exact tool+arg-prefix"
+- [ ] `src/config/settings.ts` - `permissions` block, zod-validated, so an
+      invalid rule fails at load with a path-qualified error, not at call time
+- [ ] `src/doctor.ts` - effective permission table per tool, and which rule won
+- [ ] `src/cli/index.ts` - `--permission-mode <suggest|auto-edit|full-auto>`,
+      `--yes` (pre-approve the read-only tool set only), `jaa perm list|test`
+- [ ] Subagents and MCP servers inherit the session policy, narrowed by their
+      own declarations, never widened
+- [ ] `tests/permissions.test.ts` - precedence, specificity ties, glob
+      semantics, import from Claude settings, non-TTY deny, inheritance
+      narrowing, no-widening invariant
+
+**Gate:** every tool call in the existing 161 tests resolves through the engine
+with the default ruleset and behaves identically. `jaa perm test "rm -rf /"`
+denies. `--permission-mode suggest` cannot be bypassed by a tool.
+
+**Risk:** over-prompting destroys throughput and users will reach for
+`--permission-mode full-auto` permanently. Mitigation: read-only tools
+(`read_file`, `list_dir`, `stat`, `glob`, `git_status`, `git_log`, `git_diff`,
+`git_show`) are allow-by-default at every mode except `suggest`.
+
+---
+
+### Phase 12 - OS-level sandbox
+
+**Gap closed:** ranked #2 trust blocker. Path validation is not containment.
+
+**Competitor parity:** Codex Landlock + seccomp on Linux, Seatbelt on macOS;
+Claude Code Seatbelt and bubblewrap; opencode Docker. jaa targets all three
+desktop platforms with no Docker requirement.
+
+- [ ] `src/sandbox/types.ts` - `SandboxPolicy` (writable roots, readable roots,
+      network, process spawn, env passthrough), platform capability probe
+- [ ] `src/sandbox/darwin.ts` - generate and exec a Seatbelt profile via
+      `sandbox-exec`; writable roots from the Phase 11 decision
+- [ ] `src/sandbox/linux.ts` - Landlock LSM rules plus a seccomp-bpf filter;
+      bubblewrap as the portable fallback when Landlock is unavailable
+- [ ] `src/sandbox/win32.ts` - Job Objects for process containment plus an ACL
+      guard on writable roots. Windows has no Seatbelt equivalent; be explicit
+      in docs about what is enforced versus advisory
+- [ ] `src/sandbox/detect.ts` - probe what the host actually supports, cache
+      the result, and surface it in `jaa doctor`
+- [ ] `src/sandbox/apply.ts` - wrap every `runProcess` call site; a tool that
+      cannot be sandboxed must declare so rather than silently run wide
+- [ ] `src/tools/bash.ts` and `src/tools/git.ts` route through the sandbox
+- [ ] `src/doctor.ts` - `sandbox: <mechanism> (read-only/write/network)` or an
+      explicit "unavailable on this host" with the reason
+- [ ] `tests/sandbox/*.test.ts` - policy generation per platform, escape
+      attempts against a temp tree, network-denial, plus a skip-with-reason on
+      hosts without the primitive
+
+**Gate:** on each supported platform, a command that writes outside the
+declared roots fails, and a network call under `network: false` fails. Tests
+skip with an explicit reason where the OS primitive is missing -- never a
+silent pass. `jaa doctor` names the active mechanism.
+
+**Risk:** platform sandboxing is the single most failure-prone area in this
+roadmap. Mitigation: every platform module is independently testable, the
+capability probe is mandatory before any enforcement is claimed, and an
+unavailable primitive downgrades to an explicit warning rather than a lie.
+
+---
+
+### Phase 13 - Hooks
+
+**Gap closed:** ranked #3 team-usability blocker. All four competitors have
+hooks; jaa has none.
+
+**Competitor parity:** Claude Code 10 events, Codex 9, Grok 12, opencode 7.
+jaa targets the Claude Code event vocabulary for drop-in familiarity.
+
+- [ ] `src/hooks/events.ts` - the event union: `SessionStart`,
+      `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
+      `PostToolBatch`, `PermissionRequest`, `Notification`, `SubagentStart`,
+      `SubagentStop`, `Stop`, `StopFailure`, `PreCompact`, `PostCompact`,
+      `SessionEnd`, `ConfigChange`
+- [ ] `src/hooks/types.ts` - `HookHandler` discriminated by kind, `HookEvent`
+      payload mirroring the Claude Code JSON shape, `HookDecision`
+- [ ] `src/hooks/load.ts` - read `hooks` from `jaa` config, `AGENTS.md`
+      frontmatter, `.claude/settings.json`, and plugin manifests; later layers
+      merge, never replace
+- [ ] `src/hooks/run.ts` - dispatch to `command` (stdin JSON, parse stdout),
+      `http` (POST the payload), `prompt` (inject into context),
+      `mcp` (call a server tool), `agent` (spawn a subagent for a verdict)
+- [ ] `src/hooks/decide.ts` - `PreToolUse` and `PermissionRequest` may return
+      allow / deny / ask, may rewrite tool arguments via `updatedInput`, and
+      `PostToolUse` may rewrite the result. A handler that crashes or times out
+      must resolve to the safe default (deny for pre-use, passthrough for
+      post-use), never to allow
+- [ ] Timeout and output caps per handler; stdout clamped like any tool result
+- [ ] `src/cli/index.ts` - `jaa hooks list|test <event>`; `test` runs a
+      synthetic payload through the chain and prints the decision trace
+- [ ] `tests/hooks.test.ts` - every event, every handler kind, deny/ask/allow
+      decisions, argument rewrite, crash-to-deny, timeout-to-deny, layer merge
+
+**Gate:** a `PreToolUse` hook can block a tool call. A `PostToolUse` hook can
+rewrite a result. A crashing hook denies rather than allows. Imported Claude
+Code `PreToolUse` deny rules fire.
+
+**Risk:** arbitrary command execution from config is a security surface. Phase
+11 gates it, Phase 12 contains it, and project-level hooks require the same
+workspace-trust prompt Claude Code uses.
+
+---
+
+### Phase 14 - Checkpoint, rewind and fork
+
+**Gap closed:** ranked #5. No safe experimentation without rewind.
+
+**Competitor parity:** Claude Code snapshots before every edit, `Esc Esc` and
+`/rewind` restore code and conversation; Codex forks threads and isolates in
+worktrees; opencode uses git write-tree snapshots.
+
+- [ ] `src/checkpoint/store.ts` - content-addressed snapshots of every file the
+      agent writes, stored under `~/.jaa/checkpoints/<session>/`, deduplicated
+      by hash so an unchanged file costs nothing
+- [ ] `src/checkpoint/create.ts` - snapshot before each mutating tool call,
+      tagged with turn index and tool-call id
+- [ ] `src/checkpoint/restore.ts` - restore code to any turn, restore
+      conversation to any turn, or both. Writes go through the same
+      `confinePath` and the same Phase 11 permission decision as any other write
+- [ ] `src/checkpoint/fork.ts` - branch a session from any turn into a new
+      session id, sharing nothing mutable
+- [ ] Undo of a checkpoint never touches files the agent did not write; Bash
+      side effects are explicitly out of scope and documented as such, exactly
+      as Claude Code documents it
+- [ ] `src/cli/index.ts` - `jaa rewind [turn]`, `jaa fork <id> [turn]`
+- [ ] `src/tui/app.tsx` - `Esc Esc` binding, a `/rewind` picker showing the
+      turn list with a one-line summary per turn
+- [ ] `tests/checkpoint.test.ts` - create/restore round-trip, dedup, traversal
+      refusal, fork isolation, and a test proving restore cannot escape the root
+
+**Gate:** `Esc Esc` restores the working tree to a prior turn exactly. Forked
+sessions do not share mutable state. Restore of a path outside the root is
+refused.
+
+**Risk:** disk growth. Mitigation: hash dedup plus a configurable retention
+window, pruned on session close.
+
+---
+
+### Phase 15 - Multi-agent orchestration
+
+**Gap closed:** ranked #4. `jaa agent run` becomes a real orchestrator.
+
+**Competitor parity:** Claude Code subagents + agent view + agent teams +
+dynamic workflows + `/batch` worktree fan-out; Codex `max_threads: 6`,
+`max_depth`, `spawn_agents_on_csv`, worktree isolation, auto-review; DeepSeek
+subagents + workflows + background jobs.
+
+- [ ] `src/orchestrator/task.ts` - `Task` (id, prompt, agent, status, result,
+      parent, children), a persisted task board under `~/.jaa/tasks/`
+- [ ] `src/orchestrator/pool.ts` - bounded concurrency with configurable
+      `max_threads` (default 6) and `max_depth` (default 1, matching Codex's
+      conservative default) plus a hard ceiling so a fan-out cannot run away
+- [ ] `src/orchestrator/isolation.ts` - git worktree per worker so parallel
+      agents never touch the same files; automatic cleanup including the
+      failure path, and a clear error when git is unavailable or the repo is
+      dirty in a way that blocks worktree creation
+- [ ] `src/orchestrator/background.ts` - detached workers that survive the
+      parent turn, with `jaa tasks list|attach|stop` and a completion summary
+      delivered into the parent transcript
+- [ ] `src/orchestrator/team.ts` - peer-to-peer message passing and a shared
+      task board across workers, so workers can hand off without the parent
+      relaying every message
+- [ ] `src/orchestrator/fanout.ts` - CSV and JSONL batch fan-out, one worker
+      per row, structured per-row output merged back; the Codex
+      `spawn_agents_on_csv` shape
+- [ ] `src/orchestrator/review.ts` - an independent reviewer pass over worker
+      output before it is accepted, so a worker cannot mark its own homework
+- [ ] Subagent declaration upgrades: `model`, `tools`, `disallowedTools`,
+      `skills` preload, `maxTurns`, `isolation: worktree`, `background`
+- [ ] Output scanning on every subagent report before the parent reads it --
+      a subagent that read a hostile file must not be able to inject
+      instructions into the parent conversation
+- [ ] `tests/orchestrator.test.ts` - concurrency cap, depth cap, worktree
+      isolation, background lifecycle, task-board persistence, fan-out merge,
+      reviewer independence, injection scan
+
+**Gate:** three agents edit three overlapping files in parallel with zero
+conflicts. Depth and thread caps hold under a deliberate fan-out bomb. A
+subagent cannot escalate its own permissions. Injected instructions in a
+subagent report are neutralized.
+
+**Risk:** token blowup and cost. Codex's own docs warn that deeper recursion
+"turns broad delegation instructions into repeated fan-out." Mitigation: the
+depth default stays at 1, the thread cap is enforced, and the fan-out tool
+requires an explicit opt-in flag.
+
+---
+
+### Phase 16 - Compaction and persistent memory
+
+**Gap closed:** the current `trimToBudget` silently drops context. Competitors
+summarize.
+
+**Competitor parity:** Claude Code compacts around 95% and re-reads project
+memory from disk afterward so it survives; opencode near 90%; Codex uses
+model-native compaction.
+
+- [ ] `src/agent/compact.ts` - summarization compaction at a configurable
+      threshold (default 90%), using the same provider adapter as the main loop
+      so it works on every provider including local models
+- [ ] Preserved verbatim across compaction: the system prompt, project memory
+      (`AGENTS.md` and friends), pinned skills, and any user message the user
+      marked important. Everything else is replaced by the summary
+- [ ] `src/agent/memory.ts` - auto-memory: durable notes the agent writes and
+      re-reads on the next session, scoped per project, with a size cap and a
+      visible editor (`jaa memory list|edit|clear`) so it is never a hidden
+      black box
+- [ ] Compaction is observable: `jaa ask` reports tokens before and after, and
+      the TUI shows a compaction marker in the transcript
+- [ ] `src/cli/index.ts` - `jaa compact [session] [--focus <text>]`
+- [ ] `tests/compaction.test.ts` - invariants preserved through compaction,
+      budget respected, local-model path, memory persistence and size cap
+
+**Gate:** a session driven past the compaction threshold still retains the
+system prompt, project memory, and pinned content, and the token count drops.
+Auto-memory survives a process restart.
+
+**Risk:** summarization can lose a detail that mattered. Mitigation: the
+preserved list is explicit and tested; the user can pin any turn; compaction
+never fires below the threshold.
+
+---
+
+### Phase 17 - Live code intelligence
+
+**Gap closed:** ranked #8. `jaa lsp diagnose` is a manual one-shot command;
+competitors feed real diagnostics into the loop.
+
+**Competitor parity:** opencode ships 30+ auto-installing LSP configurations and
+queries the server after every edit, feeding results into model context.
+
+- [ ] `src/lsp/registry.ts` - built-in server configs for TypeScript, Python,
+      Rust, Go, Java, C/C++, and the rest, auto-detected from the project and
+      auto-started on demand. Import opencode's `lsp` config shape
+- [ ] `src/lsp/session.ts` - one long-lived client per server instead of a
+      process per invocation; reuse the Phase 8 framing and handshake
+- [ ] `src/lsp/workspace.ts` - `didOpen` / `didChange` / `didSave` lifecycle so
+      the server actually knows the buffer state
+- [ ] `src/lsp/features.ts` - diagnostics (on change and on demand),
+      definition, references, hover, document symbols, workspace symbols
+- [ ] `src/agent/loop.ts` - after a mutating tool call, publish fresh
+      diagnostics for touched files into the next turn as a system message, so
+      the model sees real compiler errors instead of hallucinating them
+- [ ] `src/tools/lsp.ts` - expose the feature set to the agent as tools
+      (`lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`)
+- [ ] Graceful degradation: no server for the language means no diagnostics
+      and no error, reported in `jaa doctor`
+- [ ] `tests/lsp-loop.test.ts` - lifecycle, diagnostics injection after edit,
+      server crash and restart, timeout, and absence handling
+
+**Gate:** editing a file with a type error surfaces that error to the agent on
+the next turn without the model being asked. A crashing language server is
+restarted once and then ignored, never fatal.
+
+**Risk:** language servers are heavy and sometimes hang. Mitigation: startup
+is lazy and per-project, every request is bounded by a timeout, and a wedged
+server is killed and reported rather than allowed to block the loop.
+
+---
+
+### Phase 18 - Compatibility and interop layer
+
+**Gap closed:** the thesis. Full specification is the compatibility matrix
+section above; this phase is the implementation of it.
+
+- [ ] `src/compat/detect.ts` - probe every source in the read matrix, record
+      path, mtime, size, and precedence rank
+- [ ] `src/compat/memory.ts` - merge `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
+      `.cursorrules`, `.cursor/rules/*.mdc`, `.windsurfrules`, and
+      `.github/copilot-instructions.md` into one attributed project-memory
+      block. No silent rewrite; `jaa doctor` prints the full attribution table
+- [ ] `src/compat/claude.ts` - `.claude/settings.json` permission rules and
+      hook entries; `.claude/agents/*.md` and `.claude/commands/*.md`
+- [ ] `src/compat/codex.ts` - minimal TOML reader for `[mcp_servers.*]`,
+      `model`, `sandbox_mode` from `~/.codex/config.toml`. A focused parser, not
+      a general TOML dependency, unless the gate proves that wrong
+- [ ] `src/compat/opencode.ts` - `mcp`, `plugin`, `instructions`,
+      `permission`, and `agent` from `opencode.json` at both project and global
+      scope. Plugin *files* are listed, never executed
+- [ ] `src/compat/mcpjson.ts` - Claude Code `.mcp.json` -> jaa MCP clients
+- [ ] `src/compat/sync.ts` - `jaa compat sync`: generate `AGENTS.md` (guarded),
+      `CLAUDE.md`, and `.mcp.json`. Refuses to overwrite hand-written content
+      without `--force`, and writes a `.jaa/compat-manifest.json` recording what
+      it generated so a later sync can update rather than duplicate
+- [ ] `src/compat/print.ts` - `jaa compat print <codex|opencode|claude|all>`
+      emits ready-to-paste config to stdout
+- [ ] `src/compat/export.ts` - `jaa exec --output json|stream-json`, exit codes
+      `0/1/2/3`, and `jaa agent export` to `.claude/agents/*.md` and
+      `.codex/agents/*.toml`
+- [ ] `tests/fixtures/multi-harness-repo/` - a fixture repository containing
+      every read-matrix file
+- [ ] `tests/compat.test.ts` - one test per numbered acceptance assertion in
+      the matrix, plus precedence-order tests and a no-clobber test
+
+**Gate:** the five acceptance assertions in the matrix section all pass against
+the fixture repository with zero jaa-specific configuration.
+
+**Risk:** precedence surprises. A user may expect `CLAUDE.md` to win because
+that is their daily driver. Mitigation: precedence is documented, printed by
+`jaa doctor`, and overridable with an explicit `jaa` config key.
+
+---
+
+### Phase 19 - Plugin system and registry
+
+**Gap closed:** ranked #7. Skills and subagents cannot currently be bundled and
+distributed as one unit.
+
+**Competitor parity:** Claude Code plugin manifests bundling skills, agents,
+hooks, MCP servers, LSP servers, output styles, themes, and `bin`; Codex
+marketplace with 90+ first-party plugins; DeepSeek's everything-is-a-plugin
+Cordis model; opencode's `plugin` array.
+
+- [ ] `src/plugins/manifest.ts` - `jaa-plugin.json` schema: `name`, `version`,
+      `description`, `author`, `homepage`, `repository`, `license`, and
+      component paths for `skills`, `agents`, `hooks`, `mcpServers`,
+      `lspServers`, `themes`, `bin`. Read `.claude-plugin/plugin.json` too, so
+      Claude Code plugins install directly
+- [ ] `src/plugins/install.ts` - install from a local path, a git URL, or an
+      npm tarball; verify the manifest before writing; atomic install with
+      rollback on failure
+- [ ] `src/plugins/load.ts` - layered load: global then project, later layers
+      merge by name. Namespaced agent and skill ids (`plugin-name:skill-name`)
+      so two plugins cannot collide
+- [ ] `src/plugins/registry.ts` - discovery, search, install, remove, enable,
+      disable, update. Local and remote catalogs
+- [ ] `src/plugins/bin.ts` - plugin-provided executables added to the Bash
+      tool's `PATH` for the session only, never to the user's shell profile
+- [ ] Security: plugin code is executable. Plugin-provided tools, hooks, and
+      agents are subject to the Phase 11 permission engine and the Phase 12
+      sandbox. A plugin cannot widen permissions. Installing a plugin from an
+      untrusted source prints exactly what it will execute and requires
+      confirmation
+- [ ] `src/cli/index.ts` - `jaa plugin list|search|install|remove|enable|
+      disable|update|inspect`
+- [ ] `tests/plugins.test.ts` - manifest validation, layered merge, namespacing,
+      install rollback, PATH scoping, and a test proving a plugin cannot escalate
+      permissions
+
+**Gate:** a Claude Code plugin with skills, agents, and an MCP server installs
+into jaa and all three components work. Two plugins with colliding skill names
+coexist. A plugin cannot grant itself a permission the session does not have.
+
+**Risk:** this is the largest new attack surface in the roadmap. Mitigation:
+Phase 11 and 12 are hard prerequisites, plugin install is explicit and
+inspectable, and `bin` injection is session-scoped.
+
+---
+
+### Phase 20 - TUI overhaul
+
+**Gap closed:** ranked #6. The most visible surface is the least developed, and
+it is the last phase so it can render everything the previous nine built.
+
+**Competitor parity:** Codex's Rust TUI with vim motions, `/export`, session
+picker, agent dashboard, and cost-aware status line; opencode's Go TUI with
+themes, keybinds, and attention notifications; DeepSeek's typed tool cards.
+
+- [ ] `src/tui/cards.ts` - typed result cards, following DeepSeek's model
+      because it is the best of the four: `diff` (inline hunks for every
+      mutation), `terminal` (command, cwd, live output, exit code), `search`
+      (grouped matches with truncated/total so a capped result never reads as
+      complete), `web`, and `generic`. Every card carries `locations` so an
+      editor can follow along
+- [ ] `src/tui/layout.tsx` - multi-pane: transcript, tool activity, subagent
+      tree, and a dockable task board. Pane focus, split, and resize on
+      `Ctrl-p`
+- [ ] `src/tui/dashboard.tsx` - the agent dashboard: every live subagent with
+      state, current tool, elapsed time, and token spend. Attach, steer, and
+      stop from the dashboard
+- [ ] `src/tui/permissions.tsx` - an inline approval prompt rendered as a
+      first-class card showing the exact command, the rule that matched, and
+      the decision options
+- [ ] `src/tui/themes.ts` - themeable color tokens, light and dark, with a
+      `~/.jaa/theme.json` override; respect `NO_COLOR` and
+      `prefers-reduced-motion`
+- [ ] `src/tui/keybinds.ts` - configurable keymap with a discoverable palette
+- [ ] `src/tui/motions.tsx` - vim motions in the composer; expand and collapse;
+      incremental streaming render
+- [ ] `src/tui/export.ts` - `/export` to Markdown, including tool calls, diffs,
+      and the compaction markers
+- [ ] Accessibility: full keyboard reachability, visible focus, correct ARIA,
+      a screen-reader-friendly non-visual transcript mode, and no information
+      conveyed by color alone
+- [ ] `tests/tui/*.test.tsx` - card rendering per type, approval flow, dashboard
+      lifecycle, theme override, keymap override, export fidelity, and an
+      automated axe pass on the non-interactive transcript view
+
+**Gate:** a full session -- subagents, approvals, diffs, a compaction event, a
+crashed tool -- renders correctly with no layout corruption at 80x24 and at
+200x60. Every action is reachable by keyboard alone. The axe pass reports zero
+serious violations.
+
+**Risk:** Ink is a React renderer for a terminal, and heavy live updates can
+drop frames. Mitigation: incremental rendering with bounded update frequency,
+a frame budget, and a headless render test that asserts update counts.
+
+---
+
+## Deferred past Phase 20
+
+Recorded so they are not lost, explicitly not in the competitive-core scope:
+
+- Code Mode -- a model-generated TypeScript program that orchestrates many tool
+  rounds in one call. This is DeepSeek's genuine innovation and the one place
+  jaa would need to out-invent rather than out-ship. Highest-value Phase 21.
+- Background and scheduled execution -- durable jobs, wakeup scheduling, a
+  GitHub Action, cost and status lines.
+- Provider depth -- OAuth subscription auth for Claude Pro/Max and ChatGPT
+  Plus, the OpenAI Responses API, per-model reasoning-effort control, and
+  prompt-cache accounting.
+- Plugin themes as a distributable marketplace entry.
+- A web and IDE client, if the client-server split is ever worth the cost.
+
+## Definition of done for phases 11-20
+
+Every phase gate, pasted with real output:
+
+```
+npm run lint
+CI=1 npm test
+npm run build
+npm audit --audit-level=high
+npx playwright test --config=tests/e2e/playwright.config.ts   # when e2e exists
+npx wrangler deploy --dry-run                                  # N/A for jaa
+```
+
+Plus, for the roadmap as a whole:
+
+- `jaa bench` shows jaa at or above the best competitor on every tag, or the
+  specific tags where it loses are named with the reason.
+- The Phase 18 fixture repository passes all five acceptance assertions.
+- `jaa doctor` runs clean on Linux, macOS, and Windows and names the active
+  sandbox mechanism on each.
+
+Report format is unchanged: SUMMARY, FILES, PACKAGES, COMMANDS, METRICS, RISKS,
+FINDINGS, BLOCKED. Intended behavior is never reported as verified.
 
 ## Tools commands (Windows note)
 PowerShell: `rg` NOT on PATH; use the grep/glob session tools or
