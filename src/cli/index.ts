@@ -17,6 +17,7 @@ import type { ToolCall } from "../providers/types.js";
 import { createDefaultRegistry } from "../tools/index.js";
 import type { ToolContext } from "../tools/types.js";
 import { toJsonAskResult } from "./json.js";
+import { loadSkills, matchSkills, skillContext, installFromGitHub, installFromUrl, listSkillIds, removeSkill } from "../skills/index.js";
 
 const pkg = getPkgInfo();
 
@@ -174,8 +175,9 @@ program
   .option("--save", "persist the conversation to a new session")
   .option("--json", "emit machine-readable JSON to stdout instead of prose")
   .option("--no-tools", "run without tool access (plain chat only)")
-  .option("--no-bash", "advertise tools but keep the bash shell gated")
-  .action(async (prompt: string | undefined, opts: {
+    .option("--no-bash", "advertise tools but keep the bash shell gated")
+    .option("--no-skills", "disable skill autotrigger injection")
+    .action(async (prompt: string | undefined, opts: {
     prompt?: string;
     provider?: string;
     model?: string;
@@ -189,6 +191,7 @@ program
     json?: boolean;
     tools?: boolean;
     bash?: boolean;
+    skills?: boolean;
   }) => {
     const promptText = prompt ?? opts.prompt;
     if (!promptText) throw new Error("provide a prompt: the positional argument or --prompt <text>");
@@ -203,7 +206,13 @@ program
     const model = resolveModel(modelInput);
     const messages = resumed ? [...resumed.messages] : [];
     if (messages.length === 0) {
-      messages.push({ role: "system", content: opts.system ?? DEFAULT_SYSTEM_PROMPT });
+      let systemPrompt = opts.system ?? DEFAULT_SYSTEM_PROMPT;
+      if (opts.skills !== false) {
+        const active = matchSkills(loadSkills(), promptText);
+        const ctx = skillContext(active);
+        if (ctx) systemPrompt = `${systemPrompt}\n\n${ctx}`;
+      }
+      messages.push({ role: "system", content: systemPrompt });
     }
     messages.push({ role: "user", content: promptText });
 
@@ -322,6 +331,7 @@ program
   .option("--save", "persist the conversation to a new session as you go")
   .option("--no-tools", "run without tool access (plain chat only)")
   .option("--no-bash", "advertise tools but keep the bash shell gated")
+  .option("--no-skills", "disable skill autotrigger injection")
   .action(async (opts: {
     provider?: string;
     model?: string;
@@ -334,6 +344,7 @@ program
     save?: boolean;
     tools?: boolean;
     bash?: boolean;
+    skills?: boolean;
   }) => {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error("`jaa chat` needs an interactive terminal — use `jaa ask <prompt>` for one-shot output");
@@ -366,18 +377,19 @@ program
       (opts.save ? createSession({ provider: model.provider, model: model.model, messages: resumeMessages }) : undefined) ??
       undefined;
 
-    await startChat({
-      model,
-      systemPrompt: opts.system ?? DEFAULT_SYSTEM_PROMPT,
-      ...(toolsEnabled ? { tools: registry.list() } : {}),
-      executeTool,
-      ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
-      ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
-      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      ...(opts.ctx !== undefined ? { numContext: opts.ctx } : {}),
-      resumeMessages,
-      ...(session ? { sessionId: session.id } : {}),
-      onTurnEnd: (result) => {
+     await startChat({
+       model,
+       systemPrompt: opts.system ?? DEFAULT_SYSTEM_PROMPT,
+       ...(toolsEnabled ? { tools: registry.list() } : {}),
+       executeTool,
+       ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+       ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
+       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+       ...(opts.ctx !== undefined ? { numContext: opts.ctx } : {}),
+       resumeMessages,
+       ...(session ? { sessionId: session.id } : {}),
+       ...(opts.skills !== false ? { skills: loadSkills() } : {}),
+       onTurnEnd: (result) => {
         if (!session) return;
         const delta = result.messages.slice(session.messages.length);
         if (delta.length === 0) return;
@@ -389,6 +401,47 @@ program
     if (session && session.messages.length > resumeMessages.length) {
       console.error(`conversation saved to session ${session.id}`);
     }
+  });
+
+// --- skill ----------------------------------------------------------------
+const skill = program
+  .command("skill")
+  .description("manage installed skills (~/.jaa/skills/<id>/SKILL.md)");
+
+skill
+  .command("list")
+  .description("list installed skills")
+  .action(() => {
+    const ids = listSkillIds();
+    if (ids.length === 0) {
+      console.log("no skills installed — `jaa skill install <owner>/<repo>`");
+      return;
+    }
+    console.log(ids.join("\n"));
+  });
+
+skill
+  .command("install")
+  .description("install a skill from a GitHub repo or a raw SKILL.md URL")
+  .argument("<source>", 'GitHub "<owner>/<repo>" or a URL pointing to a raw SKILL.md')
+  .action(async (source: string) => {
+    let result;
+    if (/^https?:\/\//.test(source)) {
+      result = await installFromUrl(source);
+    } else {
+      result = await installFromGitHub(source);
+    }
+    console.log(`installed skill "${result.id}" at ${result.path}`);
+  });
+
+skill
+  .command("remove")
+  .description("remove an installed skill")
+  .argument("<id>", "skill directory name")
+  .action((id: string) => {
+    const removed = removeSkill(id);
+    if (!removed) throw new Error(`skill "${id}" not found`);
+    console.log(`removed skill "${id}"`);
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

@@ -5,6 +5,8 @@ import type { AgentLoopResult } from "../agent/loop.js";
 import type { ChatMessage, ResolvedModel, ToolCall, ToolDef } from "../providers/types.js";
 import { formatToolCall, linesFromMessages, summarizeToolResult } from "./render.js";
 import type { Line, LineKind } from "./render.js";
+import type { Skill } from "../skills/types.js";
+import { matchSkills, skillContext } from "../skills/index.js";
 
 export interface ChatAppProps {
   model: ResolvedModel;
@@ -15,9 +17,13 @@ export interface ChatAppProps {
   tokenBudget?: number;
   temperature?: number;
   numContext?: number;
-  resumeMessages: ChatMessage[];
+   resumeMessages: ChatMessage[];
   sessionId?: string;
   onTurnEnd?: (result: AgentLoopResult) => void;
+  /** Pre-loaded skills for autotrigger. When a user message matches a skill's
+      triggers, the skill body is injected as a system message before the
+      model call. */
+  skills?: Skill[];
 }
 
 type PendingLine = readonly [kind: LineKind, text: string, meta?: string];
@@ -49,10 +55,14 @@ function prefixFor(kind: LineKind): string {
 }
 
 export function ChatApp(props: ChatAppProps): React.JSX.Element {
-  const initialLines = useMemo(() => linesFromMessages(props.resumeMessages), [props.resumeMessages]);
+  const initialMessages = useMemo(() => {
+    if (props.resumeMessages.length > 0) return props.resumeMessages;
+    return [{ role: "system" as const, content: props.systemPrompt }];
+  }, [props.resumeMessages, props.systemPrompt]);
+  const initialLines = useMemo(() => linesFromMessages(initialMessages), [initialMessages]);
   const idRef = useRef(initialLines.length);
   const [lines, setLines] = useState<Line[]>(initialLines);
-  const [messages, setMessages] = useState<ChatMessage[]>(props.resumeMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -74,7 +84,13 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
       setBusy(true);
       setStatus("thinking …");
       addLines([["user", content]]);
-      const transcript: ChatMessage[] = [...messages, { role: "user", content }];
+      const matched = props.skills ? matchSkills(props.skills, content) : [];
+      const skillCtx = matched.length > 0 ? skillContext(matched) : "";
+      if (matched.length > 0) {
+        addLines([["assistant", `[skills] ${matched.map((s) => s.name).join(", ")}`]]);
+      }
+      const extra: ChatMessage[] = skillCtx ? [{ role: "system", content: skillCtx }] : [];
+      const transcript: ChatMessage[] = [...messages, ...extra, { role: "user", content }];
       setMessages(transcript);
       try {
         const result = await runAgentLoop({
