@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { parseHookConfig, type ValidatedHookEntry } from "./types.js";
+import { parseHookConfigResilient, type ValidatedHookEntry } from "./types.js";
 
 /**
  * Where a hook entry came from, so every decision can be attributed.
@@ -16,46 +16,143 @@ export type HookSource = "settings" | "agents" | "claude-settings" | "plugin";
 export interface LoadedHooks {
   entries: ValidatedHookEntry[];
   sources: { source: HookSource; count: number }[];
+  /**
+   * Why a layer is not in force exactly as written: entries the validator
+   * rejected, and layers it could not read at all. Never empty when something
+   * was dropped — a hook that quietly does not run is the failure mode this
+   * exists to end.
+   */
   warnings: string[];
+}
+
+/** One layer's outcome: the entries that load, and what was wrong with the rest. */
+interface HookLayer {
+  entries: ValidatedHookEntry[];
+  warnings: string[];
+}
+
+/** A fresh empty layer, so no two callers share one mutable result. */
+function emptyLayer(): HookLayer {
+  return { entries: [], warnings: [] };
+}
+
+/**
+ * Report a layer's rejected entries in the shape the CLI already uses for a
+ * layer it could not load (`hookConfigErrors` in `src/cli/index.ts`): a
+ * summary naming the file, then the validator's own message per entry, each
+ * indented under it. One format on both sides, so `jaa hooks list` and a run
+ * cannot describe the same typo two different ways — and the wording is the
+ * CLI's, not a second invention.
+ */
+function formatLayerWarning(label: string, errors: string[]): string {
+  return [`${label}: ${errors.length} invalid hook entry/entries`, ...errors.map((error) => `  ${error}`)].join("\n");
+}
+
+/**
+ * Read the `hooks` key of a JSON config file — the shape both `~/.jaa/config.json`
+ * and a project `.claude/settings.json` use.
+ *
+ * Malformed entries do not take the layer down with them: everything that
+ * validates is loaded and everything that does not is reported, so one broken
+ * handler cannot silently disarm a deny rule sitting in the same file.
+ */
+function readJsonHookLayer(path: string, label: string): HookLayer {
+  if (!existsSync(path)) return emptyLayer();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    // A file that is not JSON is diagnosed by the CLI, which names the file and
+    // the parse error. Nothing about hook config was readable here, so the
+    // loader has nothing to report of its own and does not restate it.
+    return emptyLayer();
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return emptyLayer();
+  const hooks = (parsed as Record<string, unknown>).hooks;
+  if (hooks === undefined) return emptyLayer();
+  const layer = parseHookConfigResilient(hooks);
+  return {
+    entries: layer.entries,
+    warnings: layer.errors.length > 0 ? [formatLayerWarning(label, layer.errors)] : [],
+  };
 }
 
 /** The `hooks` key in `~/.jaa/config.json` — the operator's own layer. */
 export function loadSettingsHooks(configPath: string): ValidatedHookEntry[] {
-  if (!existsSync(configPath)) return [];
+  return readJsonHookLayer(configPath, "~/.jaa/config.json").entries;
+}
+
+/**
+ * What a project AGENTS.md contributes, if anything.
+ *
+ * Always no entries, but no longer silent. `parseFrontmatter` in
+ * `src/skills/loader.ts` projects only `name`, `description` and `triggers`, so
+ * a `hooks:` key cannot survive that parse, and its YAML subset — top-level
+ * scalars and flat `- item` lists, no nesting — has no way to express
+ * `[{ event, groups: [{ handlers: [...] }] }]`. Reading `frontmatter.hooks`
+ * would mean casting onto a shape the parser never produces, so the layer stays
+ * empty.
+ *
+ * Carrying it would mean teaching that parser nested YAML, which is a change to
+ * the shared skills parser and out of scope here. Until then the file is read
+ * for a `hooks:` key and the operator is told plainly that it is being ignored,
+ * rather than left believing their hooks are armed.
+ *
+ * When it does work, these entries are untrusted (a project's AGENTS.md is not
+ * the operator's) and must merge without ever widening the operator's own
+ * settings.
+ */
+function readAgentsLayer(agentsPath: string): HookLayer {
+  if (!existsSync(agentsPath)) return emptyLayer();
   let raw: string;
   try {
-    raw = readFileSync(configPath, "utf8");
+    raw = readFileSync(agentsPath, "utf8");
   } catch {
-    return [];
+    return emptyLayer();
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-  const hooks = (parsed as Record<string, unknown>).hooks;
-  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return [];
-  const result = parseHookConfig(hooks);
-  return result.ok ? result.entries : [];
+  const block = frontmatterBlock(raw);
+  if (block === undefined || !declaresTopLevelKey(block, "hooks")) return emptyLayer();
+  return {
+    entries: [],
+    warnings: [
+      "AGENTS.md: a `hooks:` key in the frontmatter is NOT read — the frontmatter parser carries only " +
+        "name/description/triggers, and its YAML subset cannot express nested hook groups, so no hook was " +
+        "loaded from this file. Declare hooks in ~/.jaa/config.json (or .claude/settings.json) instead.",
+    ],
+  };
+}
+
+/**
+ * The raw frontmatter block of a markdown file, without its `---` fences.
+ *
+ * The opening fence is the first line; the block ends at the first `---` after
+ * it, so a `---` rule in the body does not swallow the body into the frontmatter
+ * (the skills parser closes on the *last* one, which is why this cannot simply
+ * reuse its result). The text is needed raw because `parseFrontmatter` projects
+ * three keys and discards the rest, so it cannot be asked whether a `hooks:` key
+ * is present.
+ */
+function frontmatterBlock(text: string): string | undefined {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  if (lines[0] !== "---") return undefined;
+  const close = lines.indexOf("---", 1);
+  if (close === -1) return undefined;
+  return lines.slice(1, close).join("\n");
+}
+
+/** Whether a frontmatter block declares `key` at the top level (no indent). */
+function declaresTopLevelKey(block: string, key: string): boolean {
+  return block.split("\n").some((line) => new RegExp(`^${key}\\s*:`).test(line));
 }
 
 /**
  * Hooks declared in `AGENTS.md` frontmatter.
  *
- * Always empty. The shared frontmatter parser projects only `name`,
- * `description` and `triggers`, so a `hooks:` key cannot survive the parse, and
- * its YAML subset has no way to represent an array of `{ event, groups }`
- * objects in the first place. Reading `frontmatter.hooks` would mean casting
- * onto a shape the parser never produces, so this layer stays inert until the
- * parser carries unknown keys through.
- *
- * A project's AGENTS.md is untrusted, so once it does work its entries merge
- * without ever widening the operator's own settings.
+ * No entries today, for the reason `readAgentsLayer` records; `loadAllHooks`
+ * reports the limitation when a `hooks:` key is actually present.
  */
-export function loadAgentsHooks(_agentsPath: string): ValidatedHookEntry[] {
-  return [];
+export function loadAgentsHooks(agentsPath: string): ValidatedHookEntry[] {
+  return readAgentsLayer(agentsPath).entries;
 }
 
 /**
@@ -68,30 +165,20 @@ export function loadAgentsHooks(_agentsPath: string): ValidatedHookEntry[] {
  * the permission engine already does.
  */
 export function loadClaudeSettingsHooks(settingsPath: string): ValidatedHookEntry[] {
-  if (!existsSync(settingsPath)) return [];
-  let raw: string;
-  try {
-    raw = readFileSync(settingsPath, "utf8");
-  } catch {
-    return [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-  const hooks = (parsed as Record<string, unknown>).hooks;
-  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return [];
-  const result = parseHookConfig(hooks);
-  return result.ok ? result.entries : [];
+  return readJsonHookLayer(settingsPath, ".claude/settings.json").entries;
 }
 
 /**
  * Load hooks from every configured layer, merging later layers into earlier
- * ones. Unknown event names and malformed groups are skipped with a warning
- * rather than rejected, so one bad entry cannot disable the whole chain.
+ * ones.
+ *
+ * Resilience, precisely: a malformed *group* or *handler* is skipped, named in
+ * `warnings`, and leaves its siblings in the same event loaded — a broken
+ * handler can no longer take a valid deny rule down with it. Two things stay
+ * all-or-nothing, because nothing under them is salvageable: a layer whose
+ * `hooks` value is not an object, and an event key whose value is not a
+ * non-empty array of groups. Unknown event names are skipped silently so a
+ * config written against a newer jaa still loads, as they always have.
  */
 export function loadAllHooks(input: {
   settingsPath: string;
@@ -104,23 +191,25 @@ export function loadAllHooks(input: {
   const entries: ValidatedHookEntry[] = [];
   const sources: { source: HookSource; count: number }[] = [];
 
-  const settings = loadSettingsHooks(input.settingsPath);
-  if (settings.length) {
-    entries.push(...settings);
-    sources.push({ source: "settings", count: settings.length });
+  const settings = readJsonHookLayer(input.settingsPath, "~/.jaa/config.json");
+  warnings.push(...settings.warnings);
+  if (settings.entries.length) {
+    entries.push(...settings.entries);
+    sources.push({ source: "settings", count: settings.entries.length });
   }
 
-  const agents = loadAgentsHooks(input.agentsPath);
-  if (agents.length) {
-    entries.push(...agents);
-    sources.push({ source: "agents", count: agents.length });
-  }
+  // Read for the warning only: the layer yields no entries today, so there is no
+  // `agents` source to record. If the frontmatter parser ever carries hooks
+  // through, this is the line that has to come back.
+  const agents = readAgentsLayer(input.agentsPath);
+  warnings.push(...agents.warnings);
 
   if (input.trustProjectClaudeSettings) {
-    const claude = loadClaudeSettingsHooks(input.claudeSettingsPath);
-    if (claude.length) {
-      entries.push(...claude);
-      sources.push({ source: "claude-settings", count: claude.length });
+    const claude = readJsonHookLayer(input.claudeSettingsPath, ".claude/settings.json");
+    warnings.push(...claude.warnings);
+    if (claude.entries.length) {
+      entries.push(...claude.entries);
+      sources.push({ source: "claude-settings", count: claude.entries.length });
     }
   }
 

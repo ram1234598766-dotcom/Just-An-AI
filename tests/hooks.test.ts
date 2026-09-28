@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,7 +30,7 @@ import {
   loadClaudeSettingsHooks,
   loadSettingsHooks,
 } from "../src/hooks/load.js";
-import { MAX_HOOK_OUTPUT, parseHookConfig } from "../src/hooks/types.js";
+import { MAX_HOOK_OUTPUT, parseHookConfig, parseHookConfigResilient } from "../src/hooks/types.js";
 import type {
   HookDecision,
   HookDecisionOutput,
@@ -1204,6 +1204,272 @@ describe("parseHookConfig", () => {
     for (const url of ["ftp://guard.invalid/x", "file:///etc/passwd", "https://"]) {
       expect(parseHookConfig({ PreToolUse: [{ handlers: [{ kind: "http", url }] }] }).ok, url).toBe(false);
     }
+  });
+});
+
+describe("partial hook config", () => {
+  /**
+   * A handler that is valid inside a JSON config file on any platform: the
+   * running Node, in exec form, so no shell is involved.
+   */
+  function echoHandler(body: string): Record<string, unknown> {
+    return { kind: "command", command: NODE, args: ["-e", `process.stdin.resume();process.stdout.write(${JSON.stringify(body)})`] };
+  }
+
+  function writeHooks(hooks: unknown): void {
+    writeFileSync(join(tmp, "config.json"), JSON.stringify({ hooks }));
+  }
+
+  it("keeps the valid groups in a layer when one handler is malformed", () => {
+    writeHooks({
+      PreToolUse: [
+        { matcher: "Bash", handlers: [echoHandler("first")] },
+        { matcher: "Write", handlers: [{ kind: "command" }] },
+        { matcher: "Read", handlers: [echoHandler("third")] },
+      ],
+    });
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    expect(groupCount(loaded.entries, "PreToolUse")).toBe(2);
+    expect(loaded.entries[0]?.groups.map((group) => group.matcher)).toEqual(["Bash", "Read"]);
+    expect(loaded.sources).toEqual([{ source: "settings", count: 1 }]);
+  });
+
+  it("names the rejected entry with the validator's own path, in the CLI's format", () => {
+    writeHooks({
+      PreToolUse: [
+        { matcher: "Bash", handlers: [echoHandler("kept")] },
+        { matcher: "Write", handlers: [{ kind: "command" }] },
+      ],
+    });
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    expect(loaded.warnings).toHaveLength(1);
+    const warning = loaded.warnings[0] ?? "";
+    // Same shape `hookConfigErrors` builds in src/cli/index.ts: a labelled count,
+    // then the validator's message for each entry on its own indented line.
+    expect(warning.split("\n")[0]).toBe("~/.jaa/config.json: 1 invalid hook entry/entries");
+    expect(warning).toContain("\n  PreToolUse.1.handlers.0.command: ");
+    expect(warning).toContain("~/.jaa/config.json");
+  });
+
+  it("still fires the valid groups that share a layer with a malformed one", async () => {
+    // The whole point of per-entry parsing: a deny written next to a broken
+    // handler has to reach the chain rather than vanish with it.
+    const marker = join(tmp, "fired.txt");
+    writeHooks({
+      PreToolUse: [
+        { matcher: "Bash", handlers: [echoHandler("noisy-neighbour")] },
+        { matcher: "Write", handlers: [{ kind: "command" }] },
+        {
+          matcher: "Bash",
+          handlers: [
+            {
+              kind: "command",
+              command: NODE,
+              args: [
+                "-e",
+                `let s="";process.stdin.on("data",(c)=>{s+=c});process.stdin.on("end",()=>{process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(marker)},s);process.stdout.write(JSON.stringify({decision:"deny",reason:"guard ran"}))});`,
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    const groups = loaded.entries.flatMap((entry) => entry.groups);
+    expect(groups).toHaveLength(2);
+    const chain = await decideFromHooks("PreToolUse", groups, bashPayload(), FAST);
+    expect(chain.groups.map((group) => group.fired)).toEqual([true, true]);
+    expect(chain.decision).toBe("deny");
+    expect(chain.reason).toBe("guard ran");
+    expect(existsSync(marker)).toBe(true);
+    expect(readFileSync(marker, "utf8")).toContain('"toolName":"Bash"');
+    const warning = loaded.warnings[0] ?? "";
+    expect(warning).toContain("PreToolUse.1.handlers.0.command: ");
+  });
+
+  it("keeps other events loading when one event's value has the wrong shape", () => {
+    writeHooks({ PreToolUse: "not-an-array", Stop: [{ handlers: [echoHandler("stop")] }] });
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    expect(loadedEvents(loaded.entries)).toEqual(["Stop"]);
+    const warning = loaded.warnings[0] ?? "";
+    expect(warning.split("\n")[0]).toBe("~/.jaa/config.json: 1 invalid hook entry/entries");
+    expect(warning).toContain("PreToolUse: expected an array of hook groups, got a string");
+  });
+
+  it("reports an event that is declared with no groups at all", () => {
+    writeHooks({ PreToolUse: [] });
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    expect(loaded.entries).toEqual([]);
+    expect(loaded.warnings[0] ?? "").toContain("PreToolUse: declared with no hook groups");
+  });
+
+  it("reports a hooks value that is not an object, and loads nothing from it", () => {
+    for (const hooks of [[], "nope", 7]) {
+      writeHooks(hooks);
+      const loaded = loadAllHooks(defaultHookPaths(workspace));
+      expect(loaded.entries, JSON.stringify(hooks)).toEqual([]);
+      expect(loaded.warnings[0] ?? "", JSON.stringify(hooks)).toContain(
+        "hooks config must be an object mapping event names to handler groups",
+      );
+    }
+  });
+
+  it("says nothing when the config is valid", () => {
+    writeHooks({ PreToolUse: [{ handlers: [echoHandler("fine")] }], SomeFutureEvent: [{ handlers: [echoHandler("x")] }] });
+    expect(loadAllHooks(defaultHookPaths(workspace)).warnings).toEqual([]);
+  });
+
+  it("reports a malformed .claude layer by its own label, not the operator's", () => {
+    mkdirSync(join(workspace, ".claude"), { recursive: true });
+    writeFileSync(
+      join(workspace, ".claude", "settings.json"),
+      JSON.stringify({ hooks: { Stop: [{ handlers: [{ kind: "mcp", server: "s" }] }] } }),
+    );
+    const trusted = loadAllHooks({ ...defaultHookPaths(workspace), trustProjectClaudeSettings: true });
+    expect(trusted.entries).toEqual([]);
+    expect(trusted.warnings[0]?.startsWith(".claude/settings.json: 1 invalid hook entry/entries")).toBe(true);
+    // Untrusted, the layer is not read at all — and not reported as an error.
+    expect(loadAllHooks(defaultHookPaths(workspace)).warnings).toEqual([]);
+  });
+
+  it("reports a duplicate of the same mistake once per occurrence", () => {
+    writeHooks({
+      Stop: [
+        { handlers: [{ kind: "command" }] },
+        { handlers: [{ kind: "http", url: "nope" }] },
+      ],
+    });
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    const warning = loaded.warnings[0] ?? "";
+    expect(warning.split("\n")[0]).toBe("~/.jaa/config.json: 2 invalid hook entry/entries");
+    expect(warning).toContain("Stop.0.handlers.0.command: ");
+    expect(warning).toContain("Stop.1.handlers.0.url: ");
+  });
+});
+
+describe("parseHookConfigResilient", () => {
+  const keep = { kind: "command", command: "guard" };
+
+  it("is empty for absent input and never throws", () => {
+    expect(parseHookConfigResilient(undefined)).toEqual({ entries: [], errors: [] });
+    expect(parseHookConfigResilient(null)).toEqual({ entries: [], errors: [] });
+    for (const input of ["PreToolUse", 42, ["PreToolUse"], true]) {
+      let result: ReturnType<typeof parseHookConfigResilient> | undefined;
+      expect(() => {
+        result = parseHookConfigResilient(input);
+      }).not.toThrow();
+      expect(result?.entries, JSON.stringify(input)).toEqual([]);
+      expect(result?.errors.length, JSON.stringify(input)).toBe(1);
+    }
+  });
+
+  it("skips one bad group and keeps its siblings", () => {
+    const parsed = parseHookConfigResilient({
+      PreToolUse: [{ handlers: [keep] }, { handlers: [] }, {}, "nope", { handlers: [keep] }],
+    });
+    // Two messages can come back for one rejected group (the array minimum and
+    // the group-level refine both fire on `handlers: []`), so count the groups
+    // that survived rather than the lines.
+    expect(parsed.entries).toHaveLength(1);
+    expect(parsed.entries[0]?.groups).toHaveLength(2);
+    const reported = parsed.errors.join("\n");
+    expect(reported).toContain("PreToolUse.1.handlers: ");
+    expect(reported).toContain("PreToolUse.1.(root): ");
+    expect(reported).toContain("PreToolUse.2.handlers: ");
+    expect(reported).toContain("PreToolUse.3.(root): ");
+  });
+
+  it("skips the whole group when one of its handlers is malformed", () => {
+    // The drawn line: resilience is per group, not per handler. A handler
+    // cannot be validated apart from the group that decides when it runs, so a
+    // broken one costs its group — but never the groups beside it.
+    const parsed = parseHookConfigResilient({
+      PreToolUse: [{ matcher: "Bash", handlers: [keep, { kind: "command" }] }, { matcher: "Write", handlers: [keep] }],
+    });
+    expect(parsed.entries[0]?.groups.map((group) => group.matcher)).toEqual(["Write"]);
+    expect(parsed.errors.join("\n")).toContain("PreToolUse.0.handlers.1.command: ");
+  });
+
+  it("registers nothing for an event whose every group failed", () => {
+    const parsed = parseHookConfigResilient({ PreToolUse: [{ handlers: [] }], Stop: [{ handlers: [keep] }] });
+    expect(loadedEvents(parsed.entries)).toEqual(["Stop"]);
+    expect(parsed.errors.join("\n")).toContain("PreToolUse.0.handlers: ");
+  });
+
+  it("rejects a non-array and an empty list for an event", () => {
+    const nonArray = parseHookConfigResilient({ PreToolUse: "nope", Stop: 5 });
+    expect(nonArray.entries).toEqual([]);
+    expect(nonArray.errors).toEqual([
+      "PreToolUse: expected an array of hook groups, got a string",
+      "Stop: expected an array of hook groups, got a number",
+    ]);
+    const empty = parseHookConfigResilient({ PreToolUse: [] });
+    expect(empty.entries).toEqual([]);
+    expect(empty.errors).toEqual(["PreToolUse: declared with no hook groups"]);
+  });
+
+  it("still skips an unknown event in silence, so a newer config still loads", () => {
+    const parsed = parseHookConfigResilient({
+      FutureEventV2: [{ handlers: [{ kind: "command" }] }],
+      PreToolUse: [{ handlers: [keep] }],
+    });
+    expect(parsed.errors).toEqual([]);
+    expect(loadedEvents(parsed.entries)).toEqual(["PreToolUse"]);
+  });
+
+  it("reports the same path a strict parse would, for the same mistake", () => {
+    const input = { PreToolUse: [{ handlers: [{ kind: "http", url: "nope" }] }] };
+    const strict = parseHookConfig(input);
+    const resilient = parseHookConfigResilient(input);
+    expect(strict.ok).toBe(false);
+    if (strict.ok) return;
+    expect(resilient.errors).toEqual(strict.errors);
+  });
+});
+
+describe("AGENTS.md hook layer", () => {
+  function writeAgents(body: string): void {
+    writeFileSync(join(workspace, "AGENTS.md"), body);
+  }
+
+  const WITH_HOOKS = `---\nname: project\nhooks:\n  PreToolUse:\n    - handlers:\n        - kind: command\n          command: echo pwned\n---\n\n# Project\n`;
+
+  it("tells the operator that a hooks key in the frontmatter is not read", () => {
+    writeAgents(WITH_HOOKS);
+    expect(loadAgentsHooks(join(workspace, "AGENTS.md"))).toEqual([]);
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    expect(loaded.sources.map((source) => source.source)).not.toContain("agents");
+    expect(loaded.warnings).toHaveLength(1);
+    const warning = loaded.warnings[0] ?? "";
+    expect(warning).toContain("AGENTS.md");
+    expect(warning).toContain("NOT read");
+    // Actionable: it says where to put them instead.
+    expect(warning).toContain("~/.jaa/config.json");
+  });
+
+  it("stays quiet when the frontmatter has no hooks key", () => {
+    writeAgents(`---\nname: project\ndescription: a project\ntriggers:\n  - "use when x"\n---\n\n# Project\n`);
+    expect(loadAgentsHooks(join(workspace, "AGENTS.md"))).toEqual([]);
+    expect(loadAllHooks(defaultHookPaths(workspace)).warnings).toEqual([]);
+  });
+
+  it("stays quiet for a file with no frontmatter at all", () => {
+    writeAgents(`# Project\n\nThe word hooks: appears here but is not a declaration.\n`);
+    expect(loadAllHooks(defaultHookPaths(workspace)).warnings).toEqual([]);
+  });
+
+  it("ignores a hooks mention in the body, and a nested one in the frontmatter", () => {
+    writeAgents(`---\nname: project\nnotes:\n  hooks: not a top-level key\n---\n\n# Project\n\nhooks:\n  - in the body\n`);
+    expect(loadAllHooks(defaultHookPaths(workspace)).warnings).toEqual([]);
+  });
+
+  it("does not treat an AGENTS.md rule as a hook", () => {
+    // An AGENTS.md with no frontmatter is the common case, and the loudest
+    // possible mistake would be warning about every project.
+    writeAgents(`---\nname: project\n---\n\n## Conventions\n\n- No ESLint.\n`);
+    const loaded = loadAllHooks(defaultHookPaths(workspace));
+    expect(loaded.warnings).toEqual([]);
+    expect(loaded.entries).toEqual([]);
   });
 });
 

@@ -341,10 +341,33 @@ function toHookHandler(handler: z.infer<typeof hookHandlerSchema>): HookHandler 
 }
 
 /**
+ * One issue as a single line, naming where in the config it was found.
+ *
+ * `prefix` is prepended verbatim, so a caller parsing one group at a time can
+ * supply its own position (`PreToolUse.0.`) and still produce exactly the paths
+ * `parseHookConfig` produces for the same mistake. One format, so a report from
+ * the loader and a report from the CLI are the same sentence.
+ */
+function formatIssue(prefix: string, issue: z.core.$ZodIssue): string {
+  return `${prefix}${issue.path.join(".") || "(root)"}: ${issue.message}`;
+}
+
+/** A layer parsed for the loader: what validated, and what did not. */
+export interface HookLayerParse {
+  entries: ValidatedHookEntry[];
+  /** One line per rejected item, in the `parseHookConfig` message format. */
+  errors: string[];
+}
+
+/**
  * Validate a raw hook config object.
  *
  * Returns `{ ok: true, entries }` on success or `{ ok: false, errors }` on
  * failure. Never throws: a malformed config must warn, not crash jaa.
+ *
+ * All-or-nothing, by design: it answers "is this config valid?", which is the
+ * question `jaa hooks list` asks. The loader does not want that answer — see
+ * `parseHookConfigResilient` for why.
  */
 export function parseHookConfig(input: unknown): { ok: true; entries: ValidatedHookEntry[] } | { ok: false; errors: string[] } {
   if (input === undefined || input === null) return { ok: true, entries: [] };
@@ -355,7 +378,7 @@ export function parseHookConfig(input: unknown): { ok: true; entries: ValidatedH
   if (!result.success) {
     return {
       ok: false,
-      errors: result.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`),
+      errors: result.error.issues.map((issue) => formatIssue("", issue)),
     };
   }
   const entries: ValidatedHookEntry[] = [];
@@ -368,4 +391,70 @@ export function parseHookConfig(input: unknown): { ok: true; entries: ValidatedH
     entries.push({ event, groups: groups.map(toHookGroup) });
   }
   return { ok: true, entries };
+}
+
+/**
+ * Validate a raw hook config, keeping every entry that survives on its own.
+ *
+ * `parseHookConfig` is all-or-nothing: one malformed group anywhere fails the
+ * whole object, so a single typo costs the operator every other hook in the
+ * layer. A deny rule written beside a broken handler would silently stop
+ * running, and nothing anywhere said so. The loader uses this instead and
+ * reports `errors`, so the surviving hooks are live and the mistake is named.
+ *
+ * Where the line between "skip this one" and "this layer is unusable" is drawn:
+ *
+ *   - A **group** or a **handler** that fails to validate is skipped on its
+ *     own. Siblings describe different work and are unaffected — that is the
+ *     entire point of this function.
+ *   - An **event key whose value is not an array of groups**, or is an empty
+ *     array, is reported and that event contributes nothing. Nothing under
+ *     such a key can be salvaged, so there is no item to skip; it is also
+ *     always a mistake, because an event was named and nothing was written.
+ *   - A `hooks` value that is not an object at all stays a hard error, as in
+ *     `parseHookConfig`: the layer's top-level shape is wrong, so there is
+ *     nothing to iterate and nothing to keep.
+ *
+ * An unknown event name is still skipped in silence, so a config written
+ * against a future jaa keeps working — the same rule `parseHookConfig` applies.
+ * An event whose groups all fail contributes no entry: registering an event
+ * with zero groups would claim a watcher that is not there.
+ */
+export function parseHookConfigResilient(input: unknown): HookLayerParse {
+  const entries: ValidatedHookEntry[] = [];
+  const errors: string[] = [];
+  if (input === undefined || input === null) return { entries, errors };
+  if (typeof input !== "object" || Array.isArray(input)) {
+    return { entries, errors: ["hooks config must be an object mapping event names to handler groups"] };
+  }
+  for (const [event, rawGroups] of Object.entries(input as Record<string, unknown>)) {
+    if (!isHookEvent(event)) continue;
+    if (!Array.isArray(rawGroups)) {
+      errors.push(`${event}: expected an array of hook groups, got ${describeValue(rawGroups)}`);
+      continue;
+    }
+    if (rawGroups.length === 0) {
+      errors.push(`${event}: declared with no hook groups`);
+      continue;
+    }
+    const groups: HookGroup[] = [];
+    for (const [index, rawGroup] of rawGroups.entries()) {
+      const parsed = hookGroupSchema.safeParse(rawGroup);
+      if (!parsed.success) {
+        errors.push(...parsed.error.issues.map((issue) => formatIssue(`${event}.${index}.`, issue)));
+        continue;
+      }
+      groups.push(toHookGroup(parsed.data));
+    }
+    if (groups.length === 0) continue;
+    entries.push({ event, groups });
+  }
+  return { entries, errors };
+}
+
+/** A short, safe description of a rejected value, for the message only. */
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return `a ${typeof value}`;
 }
