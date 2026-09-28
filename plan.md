@@ -247,7 +247,7 @@ activity, and permission prompts that only exist by Phase 19.
 - **2026-09-24 — GitHub:** local commits on feature branches only (`phase/<n>`).
   No `git push`, no GitHub token stored or configured; owner handles publishing
   to GitHub with his own credentials.
-- **2026-09-24 — VantaOS** (`C:\Users\Mrityunjay\Website`) is out of scope and
+- **2026-09-24 — VantaOS** (`~/Website`) is out of scope and
   must remain untouched.
 - **2026-09-24 — Keyring format:** `~/.jaa/.env` stores exactly one line per
   provider, `JAA_<PROVIDER>_API_KEY=value`. Raw line reader (not dotenv) so
@@ -260,7 +260,7 @@ activity, and permission prompts that only exist by Phase 19.
 ## Security log
 
 - **2026-08-15 message leak:** recovered source-dump included a leaked GitHub
-  token across 5 files under `C:\Users\Mrityunjay\.config\manicode\projects\jaa\chats\...`
+  token across 5 files under `~/.config/manicode/projects/jaa/chats/...`
   plus `message-history.json`. All occurrences replaced with `[REDACTED]`;
   re-scanned — no `gh[opu]_` patterns remain anywhere in `.config\manicode` or in
   the recovered source now held in `reference/`.
