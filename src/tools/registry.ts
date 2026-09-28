@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { redact } from "../config/redact.js";
 import type { ToolContext, ToolDefinition } from "./types.js";
 import type { ToolDef } from "../providers/types.js";
 
@@ -10,10 +11,37 @@ const execFileAsync = promisify(execFile);
 /** Result cap applied to every tool so a single tool never floods context. */
 export const MAX_TOOL_OUTPUT = 80_000;
 
-/** Clamp output to MAX_TOOL_OUTPUT chars, marking truncation. */
+/**
+ * Clamp output to MAX_TOOL_OUTPUT chars, marking truncation, and scrub every
+ * credential shape on the way out.
+ *
+ * ## Why this is the choke point
+ *
+ * Every string a built-in tool returns passes through here on its way into the
+ * model, and the model is the one place a credential cannot be un-sent from: it
+ * ends up in a transcript, in provider request logs, and in whatever the user
+ * pastes that transcript into. Scrubbing at the tool would mean remembering to
+ * scrub at thirteen call sites; scrubbing here means it happens once, for every
+ * tool, including the ones added later.
+ *
+ * ## Redact first, then truncate — and why the order is load-bearing
+ *
+ * Truncating first splits credentials. A 40-character token that starts 30
+ * characters before the cut arrives as a 10-character fragment, and a fragment
+ * no longer matches a length-anchored pattern — so the scrubber sees nothing
+ * where the secret is, and a *partial* credential (enough to correlate, and
+ * enough to confirm a guess) ships. Redacting first means the whole credential
+ * is present, whole, when the patterns run; replacing it makes the text
+ * shorter, so the clamp then cuts from a string that no longer contains one.
+ *
+ * The same reasoning covers the tail: a secret past the 80 000th character is
+ * removed by redaction rather than silently dropped by the clamp, so the output
+ * is short by the marker's length rather than by the secret's.
+ */
 export function clampOutput(text: string): string {
-  if (text.length <= MAX_TOOL_OUTPUT) return text;
-  return `${text.slice(0, MAX_TOOL_OUTPUT)}\n… [truncated]`;
+  const safe = redact(text);
+  if (safe.length <= MAX_TOOL_OUTPUT) return safe;
+  return `${safe.slice(0, MAX_TOOL_OUTPUT)}\n… [truncated]`;
 }
 
 /**
@@ -229,6 +257,20 @@ export interface RunProcessOptions {
   timeoutMs?: number;
   maxOutput?: number;
   /**
+   * The COMPLETE environment for the child, not an addition to the parent's.
+   *
+   * Omitted means "inherit everything", which is the historical behaviour and
+   * stays the default. But inheriting is also why a `GITHUB_TOKEN` in the
+   * operator's shell is already visible to every tool on a host with no
+   * sandbox — and Windows has no sandbox mechanism, so there is no host where
+   * the sandbox options below paper over it. A caller that has an environment
+   * to hand in (`scrubEnv(process.env)` plus what the child actually needs)
+   * passes it here; a caller that has none gets the old behaviour unchanged,
+   * because silently emptying a child's environment would break `git`, `sh`
+   * and `cmd.exe` in ways that look like unrelated bugs.
+   */
+  env?: Record<string, string>;
+  /**
    * OS-level confinement for this process. When supplied, the command is
    * wrapped in the host's sandbox mechanism. With `enforcement: "require"`
    * (the default) a host that cannot sandbox refuses to run the command at
@@ -288,6 +330,10 @@ export async function runProcess(
       maxBuffer: max * 2,
       windowsHide: true,
       encoding: "utf8",
+      // Conditional spread rather than `env: opts.env`: under
+      // exactOptionalPropertyTypes an explicit `undefined` is not the same as
+      // an absent key, and "absent" is the one that means "inherit".
+      ...(opts.env !== undefined ? { env: opts.env } : {}),
     });
     const stderr = sandboxNote !== undefined ? `${sandboxNote}\n${String(result.stderr)}` : String(result.stderr);
     return { stdout: String(result.stdout), stderr, code: 0 };
