@@ -127,6 +127,99 @@ describe("keyring", () => {
     expect(maskSecret("ab")).toBe("****");
     expect(maskSecret("sk-abcdef")).toBe("****cdef");
   });
+
+  it("leaves every line it did not write byte-for-byte alone", () => {
+    // A hand-written keyring. `GITHUB_TOKEN` is not a key jaa wrote and never
+    // will be — it is the user's own line, in a file that happens to be shared.
+    const file = join(tmp, ".env");
+    const original = [
+      "# keep this: my own notes",
+      "",
+      "GITHUB_TOKEN=keepme",
+      "JAA_OPENAI_API_KEY=already-set",
+      "",
+      "# trailing comment",
+      "",
+    ].join("\n");
+    writeFileSync(file, original, "utf8");
+
+    setKey(openai, "replaced");
+    const afterSet = readFileSync(file, "utf8");
+    expect(afterSet).toContain("GITHUB_TOKEN=keepme");
+    expect(afterSet).toContain("# keep this: my own notes");
+    expect(afterSet).toContain("# trailing comment");
+    expect(afterSet).toContain("JAA_OPENAI_API_KEY=replaced");
+    // The value was replaced IN PLACE: same line, not a new one at the end.
+    expect(afterSet.indexOf("JAA_OPENAI_API_KEY=replaced")).toBe(original.indexOf("JAA_OPENAI_API_KEY=already-set"));
+
+    setKey(providerById("anthropic")!, "added");
+    const afterAppend = readFileSync(file, "utf8");
+    expect(afterAppend).toContain("GITHUB_TOKEN=keepme");
+    expect(afterAppend).toContain("# keep this: my own notes");
+    expect(afterAppend.endsWith("JAA_ANTHROPIC_API_KEY=added\n")).toBe(true);
+
+    expect(removeKey(providerById("anthropic")!)).toBe(true);
+    const afterRemove = readFileSync(file, "utf8");
+    expect(afterRemove).toContain("GITHUB_TOKEN=keepme");
+    expect(afterRemove).toContain("# keep this: my own notes");
+    expect(afterRemove).toContain("# trailing comment");
+    expect(afterRemove).not.toContain("JAA_ANTHROPIC_API_KEY");
+  });
+
+  it("preserves CRLF line endings and a missing final newline", () => {
+    const file = join(tmp, ".env");
+    writeFileSync(file, "# windows notepad\r\nGITHUB_TOKEN=keepme\r\n", "utf8");
+    setKey(openai, "x");
+    const after = readFileSync(file, "utf8");
+    expect(after).toBe("# windows notepad\r\nGITHUB_TOKEN=keepme\r\nJAA_OPENAI_API_KEY=x\n");
+
+    writeFileSync(file, "GITHUB_TOKEN=keepme", "utf8"); // no trailing newline
+    setKey(providerById("anthropic")!, "y");
+    expect(readFileSync(file, "utf8")).toBe("GITHUB_TOKEN=keepme\nJAA_ANTHROPIC_API_KEY=y");
+  });
+
+  it("removes every copy of a duplicated key, so removed means removed", () => {
+    const file = join(tmp, ".env");
+    writeFileSync(file, "JAA_OPENAI_API_KEY=one\nGITHUB_TOKEN=keepme\nJAA_OPENAI_API_KEY=two\n", "utf8");
+    // readKeyring reports the last write, so that is the value a caller believes
+    // is stored; deleting only that one would leave the other still live.
+    expect(readKeyring().get("JAA_OPENAI_API_KEY")).toBe("two");
+    expect(removeKey(openai)).toBe(true);
+    expect(readKeyring().has("JAA_OPENAI_API_KEY")).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe("GITHUB_TOKEN=keepme\n");
+  });
+
+  it("reports a GitHub token under the id it is stored as", () => {
+    // Not a provider key, but it lives in the keyring and `jaa key list` is the
+    // only place a user can find out it was saved.
+    const github = {
+      id: "github",
+      label: "GitHub",
+      envKeys: [],
+      keyringEnv: "JAA_GITHUB_TOKEN",
+    };
+    setKey(github, "ghp_something");
+    const meta = listKeyMeta();
+    const mine = meta.find((m) => m.id === "JAA_GITHUB_TOKEN");
+    expect(mine, `not listed: ${JSON.stringify(meta)}`).toBeDefined();
+    expect(mine?.provider).toBe("github");
+    expect(mine?.masked).toBe(maskSecret("ghp_something"));
+  });
+
+  it("keeps the existing _API_KEY mapping exactly", () => {
+    setKey(providerById("azure")!, "z");
+    setKey(openai, "o");
+    // A compound id must survive intact rather than collapsing to its last
+    // segment: the old `_API_KEY`-only regex kept `azure`, and the `_TOKEN`
+    // branch has to keep doing the same.
+    setKey({ id: "my_vendor", label: "v", envKeys: [], keyringEnv: "JAA_MY_VENDOR_API_KEY" }, "v");
+    const providers = listKeyMeta().map((m) => m.provider);
+    expect(providers).toContain("azure");
+    expect(providers).toContain("openai");
+    expect(providers).toContain("my_vendor");
+    // Nothing may come back still wearing its own suffix.
+    for (const p of providers) expect(p.endsWith("_api_key") || p.endsWith("_token")).toBe(false);
+  });
 });
 
 describe("settings", () => {
