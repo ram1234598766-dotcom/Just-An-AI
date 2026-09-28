@@ -350,8 +350,25 @@ describe("fs tools", () => {
   });
 
   it("refuses path traversal via encoded separators", async () => {
-    const out = await registry.execute("read_file", JSON.stringify({ path: "..\\escape.txt" }), ctx);
+    // The separator has to be the platform's own. "\" is a separator on Windows
+    // but an ordinary filename character on POSIX, where "..\escape.txt" is a
+    // legal - merely missing - name INSIDE the root. Hardcoding the backslash
+    // made this assertion vacuous on Linux: it passed there only because a
+    // missing file produced ENOENT, which is a different claim entirely.
+    const out = await registry.execute("read_file", JSON.stringify({ path: join("..", "escape.txt") }), ctx);
     expect(out).toContain("escapes the workspace root");
+
+    // A backslash is only an escape attempt on the platform where it is a
+    // separator. Asserting the case per platform keeps the Windows attack
+    // covered without claiming a POSIX backslash can traverse anything.
+    const backslash = await registry.execute("read_file", JSON.stringify({ path: "..\\escape.txt" }), ctx);
+    if (process.platform === "win32") {
+      expect(backslash).toContain("escapes the workspace root");
+    } else {
+      // Confined correctly - it is not an escape, just a name that is not there.
+      expect(backslash).not.toContain("escapes the workspace root");
+      expect(backslash).toContain("ENOENT");
+    }
   });
 
   it("list_dir reports dirs and files with types", async () => {
