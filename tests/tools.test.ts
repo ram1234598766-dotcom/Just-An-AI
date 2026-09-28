@@ -1,9 +1,10 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDefaultRegistry } from "../src/tools/index.js";
+import { canonicalPath, confinePath } from "../src/tools/registry.js";
 import { globToRegExp } from "../src/tools/fs.js";
 import type { ToolContext } from "../src/tools/index.js";
 
@@ -20,6 +21,274 @@ afterEach(() => {
 });
 
 const registry = createDefaultRegistry();
+
+/**
+ * A second name for an existing directory, so the lexical and the canonical
+ * answers to "is this inside the root" disagree.
+ *
+ * On Windows that second name is the 8.3 short alias; on POSIX it is a symlink.
+ * A junction is used rather than a directory symlink because Windows will not
+ * create the latter without elevation, while a junction needs none.
+ */
+function aliasOf(dir: string, name: string): string {
+  const link = join(tmp, name);
+  symlinkSync(dir, link, process.platform === "win32" ? "junction" : "dir");
+  return link;
+}
+
+/**
+ * Whether this host hands out a short (8.3) spelling of its temp directory, as
+ * Windows does for any name longer than 8.3 characters. That is a property of
+ * the machine, not of the code, so the 8.3-specific assertions run only where
+ * such a pair exists rather than pretending one can be invented anywhere.
+ */
+const HOST_SHORT_FORM = realpathSync.native(tmpdir()) !== tmpdir();
+
+/**
+ * Create a directory link at `link` pointing at `target`, and say whether it is
+ * usable as one. A junction rather than a directory symlink on Windows, because
+ * creating the latter needs elevation while a junction needs none.
+ *
+ * Usability is checked rather than assumed: the link has to resolve to the
+ * target, or the assertion it supports would be testing a plain directory.
+ */
+function linkDir(target: string, link: string): boolean {
+  try {
+    symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+  } catch {
+    return false;
+  }
+  const same = (a: string, b: string): boolean =>
+    process.platform === "linux" ? a === b : a.toLowerCase() === b.toLowerCase();
+  return same(realpathSync.native(link), realpathSync.native(target));
+}
+
+/**
+ * Whether this host will create a directory link that the filesystem resolves
+ * as one. Some hosts refuse (a locked-down Windows policy, a filesystem without
+ * link support); those runs skip the link assertions rather than passing them
+ * vacuously.
+ */
+const HOST_LINKS = ((): boolean => {
+  const dir = mkdtempSync(join(tmpdir(), "jaa-linkprobe-"));
+  try {
+    return linkDir(dir, join(dir, "probe"));
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
+describe("confinePath: two spellings of one path", () => {
+  it("admits a path that only escapes because the root is spelled differently", () => {
+    const root = join(tmp, "workspace");
+    mkdirSync(root, { recursive: true });
+    const alias = aliasOf(root, "wsalias");
+    const confined: ToolContext = { root, cwd: root, allowBash: false };
+
+    // Lexically the alias is a sibling of the root, so a purely textual
+    // comparison refuses a file that is genuinely inside the workspace.
+    expect(alias).not.toBe(root);
+    expect(confinePath(confined, join(alias, "f.txt"))).toBe(join(alias, "f.txt"));
+  });
+
+  it("refuses every escape once canonicalisation is in play", () => {
+    // The fallback exists to admit a second spelling of the root, so the
+    // security property to pin is that it can only ever admit that: anything
+    // still escaping afterwards is refused, and `..` is collapsed lexically
+    // before the filesystem is consulted at all, so neither an alias nor a
+    // symlink can be used to climb out.
+    const root = join(tmp, "workspace");
+    const outside = join(tmp, "outside");
+    mkdirSync(root, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const alias = aliasOf(root, "wsalias");
+    const confined: ToolContext = { root, cwd: root, allowBash: false };
+
+    const hostile = [
+      { label: "climb out through the alias", p: join(alias, "..", "outside", "secret.txt") },
+      { label: "alias then all the way up", p: join(alias, "..", "..", "..", "..", "..", "..", "etc", "passwd") },
+      { label: "absolute path beside the root", p: join(outside, "secret.txt") },
+      { label: "relative parent segment", p: "../outside/secret.txt" },
+      { label: "deep traversal", p: "../../../../../../../../etc/passwd" },
+      { label: "parent directory itself", p: join(alias, "..") },
+    ];
+    for (const { label, p } of hostile) {
+      expect(() => confinePath(confined, p), label).toThrow(/escapes the workspace root/);
+    }
+
+    // `..` that lands back inside is still fine: the alias makes no difference
+    // to how a path is resolved, only to how the two results are compared.
+    expect(confinePath(confined, join(alias, "..", "workspace", "ok.txt"))).toBe(join(root, "ok.txt"));
+  });
+
+  it("leaves the normalised form of a path stable, and never the caller's own spelling", () => {
+    // The normal form is what the two spellings are compared as, so it has to
+    // be a fixed point; and the value handed back to callers stays theirs, so
+    // nothing downstream sees a path it did not pass in.
+    const once = canonicalPath(tmp);
+    expect(canonicalPath(once)).toBe(once);
+
+    const root = join(tmp, "workspace");
+    mkdirSync(root, { recursive: true });
+    const alias = aliasOf(root, "wsalias");
+    const confined: ToolContext = { root, cwd: root, allowBash: false };
+    const mine = join(alias, "f.txt");
+    expect(confinePath(confined, mine)).toBe(mine);
+    expect(canonicalPath(mine)).toBe(join(realpathSync.native(root), "f.txt"));
+  });
+
+  it.skipIf(!HOST_SHORT_FORM)("admits a real Windows 8.3 short path against a long root", () => {
+    // The reported failure, with a genuine short path rather than a stand-in:
+    // `process.cwd()` and a snapshot recorded by an earlier run can disagree
+    // about how to spell one directory, and the short form then looks like an
+    // unrelated tree two levels up.
+    const longRoot = realpathSync.native(tmp);
+    const shortRoot = tmp;
+    expect(shortRoot, "this host must expose a short/long pair").not.toBe(longRoot);
+
+    mkdirSync(join(longRoot, "src"), { recursive: true });
+    const shortArg = join(shortRoot, "src", "registry.ts");
+    const confined: ToolContext = { root: longRoot, cwd: longRoot, allowBash: false };
+
+    expect(canonicalPath(shortArg)).toBe(join(longRoot, "src", "registry.ts"));
+    expect(confinePath(confined, shortArg)).toBe(shortArg);
+    // And the other way round: a long argument is no more of an escape than a
+    // short one.
+    const longArg = join(longRoot, "src", "registry.ts");
+    const shortCtx: ToolContext = { root: shortRoot, cwd: shortRoot, allowBash: false };
+    expect(confinePath(shortCtx, longArg)).toBe(longArg);
+  });
+
+  it.skipIf(!HOST_SHORT_FORM)("still refuses a short path that genuinely leaves the root", () => {
+    // The 8.3 fix must not become a licence: a short spelling of a directory
+    // that is genuinely outside the workspace stays refused.
+    const shortWorkspace = join(tmp, "workspace");
+    mkdirSync(shortWorkspace, { recursive: true });
+    const root = realpathSync.native(shortWorkspace);
+    const confined: ToolContext = { root, cwd: root, allowBash: false };
+    const shortElsewhere = join(tmpdir(), "definitely-not-the-workspace", "secret.txt");
+    expect(canonicalPath(shortElsewhere)).not.toContain(join(root, "definitely-not-the-workspace"));
+    expect(() => confinePath(confined, shortElsewhere)).toThrow(/escapes the workspace root/);
+  });
+});
+
+describe("confinePath: a link planted inside the root", () => {
+  /**
+   * A workspace with a sibling directory outside it, for the link to straddle.
+   * Returns the pieces so each test reads as "root, an outside dir, a link".
+   */
+  function planted(): { root: string; outside: string; confined: ToolContext } {
+    const root = join(tmp, "workspace");
+    const outside = join(tmp, "outside");
+    mkdirSync(root, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    return { root, outside, confined: { root, cwd: root, allowBash: false } };
+  }
+
+  it.skipIf(!HOST_LINKS)("refuses a path that is lexically in-root but points out through a link", () => {
+    // The bug this pins: `link/evil.txt` is textually inside the workspace, so a
+    // lexical check admits it and hands `fs` a write that lands in `outside`.
+    // Containment has to be decided on where the path points, not on how it is
+    // spelled, or a link planted inside the root is a write primitive out of it.
+    const { root, outside, confined } = planted();
+    expect(linkDir(outside, join(root, "link"))).toBe(true);
+
+    const victim = join(root, "link", "evil.txt");
+    expect(victim.startsWith(root), "the path must be lexically in-root, or this tests nothing").toBe(true);
+    expect(() => confinePath(confined, victim)).toThrow(/escapes the workspace root/);
+  });
+
+  it.skipIf(!HOST_LINKS)("refuses a not-yet-created file reached through a link", () => {
+    // A write names a file that does not exist yet, so resolution has to walk to
+    // the deepest existing ancestor — the link — and re-append the missing tail
+    // onto wherever the link leads. `new/deep.txt` must land in `outside`, and
+    // the request for it must be refused.
+    const { root, outside, confined } = planted();
+    expect(linkDir(outside, join(root, "link"))).toBe(true);
+
+    expect(() => confinePath(confined, join(root, "link", "new", "deep.txt"))).toThrow(
+      /escapes the workspace root/,
+    );
+    expect(existsSync(join(outside, "new"))).toBe(false);
+  });
+
+  it.skipIf(!HOST_LINKS)("refuses the write itself, and nothing lands outside the root", async () => {
+    // End to end, because a refusal that only `confinePath` honours would be
+    // worth nothing: the point is that no file appears in the target directory.
+    const { root, outside, confined } = planted();
+    expect(linkDir(outside, join(root, "link"))).toBe(true);
+
+    const out = await registry.execute(
+      "write_file",
+      JSON.stringify({ path: join(root, "link", "evil.txt"), content: "owned" }),
+      confined,
+    );
+    expect(out).toContain("escapes the workspace root");
+    expect(existsSync(join(outside, "evil.txt"))).toBe(false);
+  });
+
+  it.skipIf(!HOST_LINKS)("refuses a link one level deeper in the path", () => {
+    // The link is not at the top of the path it escapes through: resolution has
+    // to keep walking past the in-root components rather than checking the head.
+    const { root, outside, confined } = planted();
+    mkdirSync(join(root, "src"), { recursive: true });
+    expect(linkDir(outside, join(root, "src", "link"))).toBe(true);
+
+    expect(() => confinePath(confined, join(root, "src", "link", "evil.txt"))).toThrow(
+      /escapes the workspace root/,
+    );
+  });
+
+  it.skipIf(!HOST_LINKS)("still admits a link that points at another place inside the root", () => {
+    // The fix must refuse links, not links-to-outside: a workspace that links
+    // its own directories together is ordinary, and resolving cannot tell the
+    // two apart from the path text — only from where the link lands.
+    const { root, confined } = planted();
+    mkdirSync(join(root, "packages"), { recursive: true });
+    expect(linkDir(join(root, "packages"), join(root, "link"))).toBe(true);
+
+    const target = join(root, "link", "app.ts");
+    expect(confinePath(confined, target)).toBe(target);
+  });
+
+  it.skipIf(!HOST_LINKS)("writes through a link back into the root", async () => {
+    const { root, confined } = planted();
+    mkdirSync(join(root, "packages"), { recursive: true });
+    expect(linkDir(join(root, "packages"), join(root, "link"))).toBe(true);
+
+    const out = await registry.execute(
+      "write_file",
+      JSON.stringify({ path: join(root, "link", "app.ts"), content: "x" }),
+      confined,
+    );
+    expect(out).not.toContain("escapes the workspace root");
+    expect(existsSync(join(root, "packages", "app.ts"))).toBe(true);
+  });
+
+  it("admits an ordinary in-root path", () => {
+    const { root, confined } = planted();
+    const ordinary = join(root, "src", "index.ts");
+    expect(confinePath(confined, ordinary)).toBe(ordinary);
+    expect(confinePath(confined, "src/index.ts")).toBe(ordinary);
+  });
+
+  it("still refuses traversal out of the root", () => {
+    // `..` is collapsed before the filesystem is consulted, so no link and no
+    // spelling can be used to climb out with it.
+    const { outside, confined } = planted();
+    for (const p of [
+      join(outside, "secret.txt"),
+      "../outside/secret.txt",
+      join("..", "outside", "secret.txt"),
+      join(confined.root, "..", "outside", "secret.txt"),
+      "../../../../../../../../etc/passwd",
+    ]) {
+      expect(() => confinePath(confined, p), p).toThrow(/escapes the workspace root/);
+    }
+  });
+});
 
 describe("tool registry", () => {
   it("advertises every registered tool as a provider-neutral ToolDef", () => {
