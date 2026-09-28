@@ -113,8 +113,8 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | 10 | Benchmark + parity harness (the measuring stick) | `f8b6928` | **done, unmeasured** (parity blocked, no model) |
 | 11 | Permission system (allow/deny/ask/defer + rules) | `09cb41f` | **done** |
 | 12 | OS-level sandbox (Seatbelt / bubblewrap) | `de3ce22` | **done on macOS + Linux, none on Windows** (4 open gaps) |
-| 13 | Hooks (lifecycle events + blocking decisions) | - | planned |
-| 14 | Checkpoint, rewind and fork | - | planned |
+| 13 | Hooks (lifecycle events + blocking decisions) | `1b6f2ac` | **done** |
+| 14 | Checkpoint, rewind and fork | `1b6f2ac` | **done** (3 known limits) |
 | 15 | Multi-agent orchestration (parallel + worktrees + background) | - | planned |
 | 16 | Compaction and persistent memory | - | planned |
 | 17 | Live code intelligence (LSP in the loop) | - | planned |
@@ -146,6 +146,30 @@ activity, and permission prompts that only exist by Phase 19.
 
 ## Decisions (dated)
 
+- **2026-09-27 — Phases 13 and 14 shipped together in one commit (`1b6f2ac`).**
+  They share the turn-index contract — `runAgentLoop` tags a checkpoint with the
+  1-based *message position* of the assistant message that proposed the call, not
+  the model-turn counter, because the counter drifts the moment one turn emits
+  several messages. `restoreMessagesToTurn` and `forkSession` slice on message
+  positions, so the two halves only line up because of that choice.
+  - *Fail-closed is enforced at two levels.* Within a group, `deny > ask > allow`
+    regardless of declaration order, and on a blocking event any crashed or timed-out
+    handler forces the group to `deny`. Across groups the same ranking applies, so an
+    `allow` group cannot shadow a later `ask`. Both were found by review after the
+    first implementation resolved `[allow, deny]` to `allow` — the exact case the gate
+    exists to catch.
+  - *Restore semantics were inverted and are now per file.* A snapshot tagged turn T
+    is taken *before* turn T's write, so restoring "the state at the end of turn T"
+    means the single snapshot with the smallest turn tag strictly **greater** than T.
+    The first implementation used `<= T`, which restored the oldest content and never
+    touched a file written at T.
+  - *Three known limits, deliberately not hidden:*
+    1. `recordCheckpoint` dedups by content hash and returns early on a repeat, so a
+       content that recurs keeps only its earliest tag and cannot express "this content
+       was current at end of turn T". Fixing it needs a turn→content index in the store.
+    2. Turn↔message mapping is still positional, so a turn covering several messages
+       will drift until the loop persists an explicit turn index.
+    3. Hashing reads as `utf8`, so binary files hash and restore lossily.
 - **2026-09-25 — Phase 12 shipped a smaller scope than planned, deliberately.**
   The plan called for `src/sandbox/darwin.ts`, `src/sandbox/linux.ts`
   (Landlock + seccomp) and `src/sandbox/win32.ts` (Job Objects + ACL guard).
