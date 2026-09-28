@@ -3,10 +3,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
+import { REDACTED, redact } from "../src/config/redact.js";
 import { createDefaultRegistry } from "../src/tools/index.js";
-import { canonicalPath, confinePath } from "../src/tools/registry.js";
+import { canonicalPath, clampOutput, confinePath, createRegistry, MAX_TOOL_OUTPUT, runProcess } from "../src/tools/registry.js";
 import { globToRegExp } from "../src/tools/fs.js";
-import type { ToolContext } from "../src/tools/index.js";
+import type { ToolContext, ToolDefinition } from "../src/tools/index.js";
 
 let tmp: string;
 let ctx: ToolContext;
@@ -449,6 +451,161 @@ describe("web tool", () => {
   it("refuses non-http schemes", async () => {
     const out = await registry.execute("fetch_url", JSON.stringify({ url: "file:///etc/passwd" }), ctx);
     expect(out).toContain("only http(s)");
+  });
+});
+
+/** Echoes two variables as JSON, so "which env did the child get" is one read. */
+const PROBE = `process.stdout.write(JSON.stringify({
+  given: process.env.JAA_GIVEN ?? null,
+  parent: process.env.JAA_PARENT_ONLY ?? null,
+  home: process.env.HOME ?? process.env.USERPROFILE ?? null,
+}))`;
+
+interface Probe {
+  given: string | null;
+  parent: string | null;
+  home: string | null;
+}
+
+describe("runProcess: the child environment", () => {
+  afterEach(() => {
+    delete process.env.JAA_PARENT_ONLY;
+  });
+
+  it("passes only what the caller supplied", async () => {
+    process.env.JAA_PARENT_ONLY = "inherited";
+    const result = await runProcess(process.execPath, ["-e", PROBE], {
+      cwd: tmp,
+      env: { JAA_GIVEN: "yes" },
+    });
+    expect(result.code).toBe(0);
+    const seen = JSON.parse(result.stdout) as Probe;
+    expect(seen.given).toBe("yes");
+    // The whole point of the field: a token in the operator's shell must not
+    // reach a child just because nobody remembered to filter it.
+    expect(seen.parent).toBeNull();
+  });
+
+  it("inherits the parent environment when no env is given", async () => {
+    process.env.JAA_PARENT_ONLY = "inherited";
+    const result = await runProcess(process.execPath, ["-e", PROBE], { cwd: tmp });
+    expect(result.code).toBe(0);
+    const seen = JSON.parse(result.stdout) as Probe;
+    expect(seen.parent).toBe("inherited");
+  });
+
+  it("gives an empty env when that is what the caller asked for", async () => {
+    process.env.JAA_PARENT_ONLY = "inherited";
+    const result = await runProcess(process.execPath, ["-e", PROBE], { cwd: tmp, env: {} });
+    expect(result.code).toBe(0);
+    const seen = JSON.parse(result.stdout) as Probe;
+    expect(seen.parent).toBeNull();
+    // `seen.home` is deliberately NOT asserted as null: Windows synthesises a
+    // floor of variables (SystemRoot, USERPROFILE, COMSPEC, PATHEXT) into every
+    // new process whatever the environment block says, so a child there can
+    // never see literally nothing. The guarantee is that the PARENT's
+    // variables are gone, which is the one that matters.
+  });
+});
+
+describe("every tool result is scrubbed on its way to the model", () => {
+  it("clampOutput redacts first and clamps second", () => {
+    const PAT = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8";
+    expect(clampOutput(PAT)).toBe(REDACTED);
+    const long = "a".repeat(MAX_TOOL_OUTPUT + 1);
+    const out = clampOutput(long);
+    expect(out).toContain("truncated");
+    // The clamp is applied to the redacted text, so the cap is still the cap.
+    expect(out.length).toBe(MAX_TOOL_OUTPUT + "\n… [truncated]".length);
+  });
+
+  /** A tool whose entire output is a credential, which is the worst case. */
+  function leakyTool(value: string): ToolDefinition {
+    return {
+      name: "leak",
+      description: "returns a credential",
+      inputSchema: { type: "object", properties: {}, required: [] },
+      schema: z.object({}),
+      run: async () => `here you go:\n${value}\nbye`,
+    };
+  }
+
+  const PAT = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8";
+  // Assembled from parts so the literals in this file are not themselves
+  // scanner hits: a fixture that blocks its own commit gets deleted.
+  const PEM_BLOCK = [
+    "-----BEGIN ",
+    "RSA PRIVATE KEY-----",
+    "\nMIIEowIBAAKCAQEAx7Vv9Q2m0pQ1sT8uW3\n",
+    "-----END ",
+    "RSA PRIVATE KEY-----",
+  ].join("");
+  const REMOTE_WITH_USERINFO = "https://someuser:" + "somesecretpassword@github.com/o/r.git";
+  const SHAPES: ReadonlyArray<{ id: string; value: string }> = [
+    { id: "classic PAT", value: PAT },
+    { id: "Anthropic key", value: "sk-ant-" + "AbCdEf0123456789-_AbCdEf0123" },
+    { id: "AWS key id", value: "AKIA" + "Q7W2E9RT4YU6IO1P" },
+    { id: "Slack token", value: "xoxb-" + "1234567890-abcdefghij" },
+    { id: "private key", value: PEM_BLOCK },
+    { id: "URL credential", value: REMOTE_WITH_USERINFO },
+  ];
+
+  for (const shape of SHAPES) {
+    it(`redacts a ${shape.id} returned by a tool`, async () => {
+      const scoped = createRegistry([leakyTool(shape.value)]);
+      const out = await scoped.execute("leak", "{}", ctx);
+      expect(out).toContain(REDACTED);
+      expect(out).not.toContain(shape.value);
+      expect(out).toContain("here you go:");
+      expect(out).toContain("bye");
+    });
+  }
+
+  it("redacts a credential thrown as an error message", async () => {
+    const throwing: ToolDefinition = {
+      ...leakyTool("unused"),
+      run: async () => {
+        throw new Error(`upstream rejected ${PAT}`);
+      },
+    };
+    const out = await createRegistry([throwing]).execute("leak", "{}", ctx);
+    expect(out).toContain(REDACTED);
+    expect(out).not.toContain(PAT);
+  });
+
+  it("redacts a credential that straddles the truncation boundary", async () => {
+    // Placed so a clamp would cut the token in half and leave 8 characters of
+    // it in the output.
+    const prefix = "x".repeat(MAX_TOOL_OUTPUT - 20);
+    const out = await createRegistry([leakyTool(`${prefix}${PAT}`)]).execute("leak", "{}", ctx);
+    expect(out).toContain("truncated");
+    expect(out).not.toContain(PAT.slice(0, 4));
+    expect(out).not.toContain(PAT.slice(0, 8));
+    expect(out).not.toContain(PAT.slice(-4));
+  });
+
+  it("CONTROL: clamping before redacting would have leaked that fragment", async () => {
+    // The ordering in `clampOutput` is the whole defence, and this is what it
+    // buys. Take the same string, truncate it the other way round, and the
+    // 8 surviving characters match no pattern — `redact` returns the text
+    // unchanged, so a partial credential would go straight to the model.
+    const prefix = "x".repeat(MAX_TOOL_OUTPUT - 20);
+    const truncated = `${prefix}${PAT}`.slice(0, MAX_TOOL_OUTPUT);
+    expect(truncated).toContain(PAT.slice(0, 8));
+    expect(redact(truncated)).toBe(truncated);
+  });
+
+  it("redacts a credential that sits past the truncation boundary", async () => {
+    const filler = "y".repeat(MAX_TOOL_OUTPUT + 10_000);
+    const out = await createRegistry([leakyTool(`${filler}${PAT}`)]).execute("leak", "{}", ctx);
+    expect(out).toContain("truncated");
+    expect(out).not.toContain(PAT);
+  });
+
+  it("leaves ordinary tool output alone", async () => {
+    const ordinary = 'git config user.email "t@example.com"\nsee https://example.com/docs\nJAA_KEY = "sk-ant-test"';
+    const out = await createRegistry([leakyTool(ordinary)]).execute("leak", "{}", ctx);
+    expect(out).toContain(ordinary);
   });
 });
 
