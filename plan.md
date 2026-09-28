@@ -113,8 +113,8 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | 10 | Benchmark + parity harness (the measuring stick) | `f8b6928` | **done, unmeasured** (parity blocked, no model) |
 | 11 | Permission system (allow/deny/ask/defer + rules) | `09cb41f` | **done** |
 | 12 | OS-level sandbox (Seatbelt / bubblewrap) | `de3ce22` | **done on macOS + Linux, none on Windows** (4 open gaps) |
-| 13 | Hooks (lifecycle events + blocking decisions) | `1b6f2ac` | **done** |
-| 14 | Checkpoint, rewind and fork | `1b6f2ac` | **done** (3 known limits) |
+| 13 | Hooks (lifecycle events + blocking decisions) | `e9a81ab` | **done** |
+| 14 | Checkpoint, rewind and fork | `e9a81ab` | **done** (3 known limits) |
 | 15 | Multi-agent orchestration (parallel + worktrees + background) | - | planned |
 | 16 | Compaction and persistent memory | - | planned |
 | 17 | Live code intelligence (LSP in the loop) | - | planned |
@@ -146,7 +146,7 @@ activity, and permission prompts that only exist by Phase 19.
 
 ## Decisions (dated)
 
-- **2026-09-27 — Phases 13 and 14 shipped together in one commit (`1b6f2ac`).**
+- **2026-09-27 — Phases 13 and 14 shipped together in one commit (`e9a81ab`).**
   They share the turn-index contract — `runAgentLoop` tags a checkpoint with the
   1-based *message position* of the assistant message that proposed the call, not
   the model-turn counter, because the counter drifts the moment one turn emits
