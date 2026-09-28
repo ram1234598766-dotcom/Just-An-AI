@@ -3,6 +3,27 @@ import { z } from "zod";
 import { runProcess } from "./registry.js";
 import type { ToolContext, ToolDefinition } from "./types.js";
 
+/**
+ * The variables the sandbox wrapper forwards to the shell.
+ *
+ * Exported so the "no credential-shaped name is in here" property is something a
+ * test can read off the call site rather than a comment about it. Same rule as
+ * in `git.ts`: the auth variables jaa builds for a child process travel through
+ * `runProcess`'s `env` field and must never be added to a passthrough list, which
+ * is a list of *names* copied out of the operator's own environment.
+ */
+export const BASH_SANDBOX_ENV_PASSTHROUGH: readonly string[] = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "LANG",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "SystemRoot",
+  "COMSPEC",
+];
+
 const bashSchema = z.object({
   command: z.string().min(1),
   timeoutMs: z.number().int().min(100).max(120_000).default(30_000),
@@ -34,7 +55,7 @@ async function bashTool(args: unknown, ctx: ToolContext): Promise<string> {
         writableRoots: [ctx.root],
         readableRoots: [ctx.root],
         network: ctx.allowNetwork === true,
-        envPassthrough: ["PATH", "HOME", "USERPROFILE", "LANG", "TMPDIR", "TEMP", "TMP", "SystemRoot", "COMSPEC"],
+        envPassthrough: [...BASH_SANDBOX_ENV_PASSTHROUGH],
         enforcement: ctx.sandboxEnforcement ?? "require",
       },
     },

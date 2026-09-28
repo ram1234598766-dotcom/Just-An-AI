@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { GIT_CONFIG, GIT_ENV_ALLOWLIST, baseGitEnv } from "./gitEnv.js";
 import { runProcess } from "./registry.js";
 import type { ToolContext, ToolDefinition } from "./types.js";
 
@@ -9,29 +10,23 @@ import type { ToolContext, ToolDefinition } from "./types.js";
 const GIT = "git";
 
 /**
- * Top-level git hardening: `-c` config overrides, which must appear BEFORE the
- * subcommand.
+ * The variables the sandbox wrapper forwards to the git child.
  *
- * `core.fsmonitor` matters as much as the rest: a repository-local
- * `[core] fsmonitor = /path/to/program` is executed by `git status` and
- * `git diff`, so without `-c core.fsmonitor=false` a `write_file` into
- * `.git/config` is code execution even with `--no-ext-diff` in place. Verified
- * on Linux with the exact argv below.
+ * The same list {@link baseGitEnv} hands `runProcess`, deliberately: bubblewrap
+ * starts the child from `--clearenv` and re-adds only what `envPassthrough`
+ * names, read from its own environment. A name the two lists disagree about is
+ * a name that silently vanishes for the *inner* git on a Linux host while still
+ * working on a Windows one — the kind of difference that only shows up in
+ * production, on the other platform.
+ *
+ * Exported so a test can read the list the call site actually uses rather than a
+ * copy of it, and so that "no credential-shaped name is in here" is a checked
+ * property rather than a comment. The auth variables reach git through
+ * `runProcess`'s `env` field and must never be added here: a sandbox
+ * passthrough is a *name* read out of the parent environment, and the token is
+ * a value jaa put in the child deliberately.
  */
-const GIT_CONFIG = [
-  "-c",
-  "core.pager=cat",
-  "-c",
-  "core.hooksPath=",
-  "-c",
-  "core.fsmonitor=false",
-  "-c",
-  "diff.external=",
-  "-c",
-  "credential.helper=",
-  "-c",
-  "protocol.ext.allow=never",
-];
+export const GIT_SANDBOX_ENV_PASSTHROUGH: readonly string[] = GIT_ENV_ALLOWLIST;
 
 /**
  * Subcommand-level hardening. These are options of the *diff-producing*
@@ -62,6 +57,18 @@ async function runGit(
     {
       cwd: ctx.root,
       timeoutMs,
+      // An explicit environment, not an omitted one. Omitted means "inherit
+      // everything", and on a host with no sandbox — which is every Windows
+      // host, and Windows has no sandbox mechanism to install — that is the
+      // whole boundary: a `GITHUB_TOKEN` in the operator's shell reaches this
+      // child today with no code having asked for it.
+      //
+      // `baseGitEnv` and nothing more. These four subcommands run `status`,
+      // `log`, `diff` and `show` against the local repository and contact no
+      // remote, so a token on them would be pure exposure: there is no
+      // authentication for them to perform. A git invocation that does reach a
+      // remote is `gitRemoteEnv`'s job, in `src/skills/install.ts`.
+      env: baseGitEnv(),
       // The argv here is fixed and jaa-controlled, unlike `bash`, so a host with
       // no OS sandbox still gets a usable (hardened) tool rather than a refusal.
       // Residual risk is a hostile git config we have not thought of, which is
@@ -70,7 +77,7 @@ async function runGit(
         writableRoots: [ctx.root],
         readableRoots: [ctx.root],
         network: false,
-        envPassthrough: ["PATH", "HOME", "USERPROFILE", "SystemRoot", "TEMP", "TMP"],
+        envPassthrough: [...GIT_SANDBOX_ENV_PASSTHROUGH],
         enforcement: "best-effort",
       },
     },
