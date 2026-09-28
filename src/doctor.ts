@@ -1,9 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hasKey } from "./config/keyring.js";
 import { providerStatuses } from "./config/providers.js";
+import { jaaHome } from "./config/paths.js";
+import { maskToken, redact } from "./config/redact.js";
+import { broadClassicScopes } from "./config/setup.js";
+import { resolveGitHubAuth } from "./github/auth.js";
+import { verifyGitHubToken } from "./github/verify.js";
 import type { Engine } from "./permissions/engine.js";
 import { resolveDecision } from "./permissions/engine.js";
 import type { PermissionMode } from "./permissions/types.js";
@@ -21,6 +26,19 @@ export interface DoctorCheck {
 
 export interface DoctorReport {
   checks: DoctorCheck[];
+}
+
+/**
+ * How to run the diagnostics without touching the network.
+ *
+ * The GitHub check has to ask GitHub who the token belongs to — that is the only
+ * way to report scopes and the remaining rate limit — and a test that reaches
+ * api.github.com is a test that fails on a laptop in a tunnel and a suite that
+ * cannot be run offline. `fetchImpl` is therefore injectable, and omitting it
+ * means the real `fetch`, which is what the CLI does.
+ */
+export interface DoctorOptions {
+  fetchImpl?: typeof fetch | undefined;
 }
 
 const NODE_REQUIRED_MAJOR = 22;
@@ -45,7 +63,11 @@ function platformCheck(): DoctorCheck {
 }
 
 function dataDirCheck(): DoctorCheck {
-  const dir = join(homedir(), ".jaa");
+  // `jaaHome()`, not `join(homedir(), ".jaa")`: every other module in the
+  // codebase resolves the root through it, so hard-coding `homedir()` here made
+  // `JAA_HOME` change every other path and not this one — a diagnostic that
+  // reported the real `~/.jaa` while every write went to the override.
+  const dir = jaaHome();
   const exists = existsSync(dir);
   return {
     key: "data-dir",
@@ -100,6 +122,85 @@ function providersCheck(): DoctorCheck {
     status: configured.length > 0 ? "ok" : "info",
     message: `${configured.length} provider(s) configured`,
     detail,
+  };
+}
+
+/**
+ * Report the GitHub credential, and only ever in its masked form.
+ *
+ * Four things an operator cannot otherwise answer: which source jaa will use
+ * (there are seven, and the first three are process environment, so an
+ * apparently-missing stored token is usually an exported one), which token it
+ * is, what it may do, and how much of the rate limit is left.
+ *
+ * `anonymous` is a legitimate state, not a failure: public reads work, and a
+ * missing token is a normal way to run. It is `info` and says what it costs —
+ * a lower rate limit and no private repositories.
+ *
+ * A rate limit is reported only when one was actually read. With no token
+ * nothing is sent, so there is no number to report and the check says so
+ * instead of quoting GitHub's documented anonymous ceiling as if it were the
+ * remaining count.
+ */
+async function githubAuthCheck(opts: DoctorOptions): Promise<DoctorCheck> {
+  const auth = resolveGitHubAuth();
+
+  if (auth.token === undefined) {
+    return {
+      key: "github-auth",
+      status: "info",
+      message: "github: anonymous (no token configured)",
+      detail:
+        "public access works, so GitHub-backed features run; unauthenticated requests are capped at 60/hour against " +
+        "5,000/hour for a token, and private repositories are invisible to jaa. Rate limit remaining was not read: " +
+        "nothing was sent, so there was nothing to read it from. `jaa key set github` configures one.",
+    };
+  }
+
+  const masked = maskToken(auth.token);
+  const verified = await verifyGitHubToken(auth.token, {
+    ...(opts.fetchImpl === undefined ? {} : { fetchImpl: opts.fetchImpl }),
+  });
+
+  if (!verified.ok) {
+    return {
+      key: "github-auth",
+      status: "warn",
+      message: `github: token from ${auth.source} (${masked}) was not accepted`,
+      // The reason came from GitHub, so it is scrubbed like any other untrusted
+      // body. The token itself is replaced by `maskToken` above and never
+      // appears below.
+      detail: `${redact(verified.error ?? "no reason given")} GitHub-backed features will fail until this is replaced: \`jaa key set github\`.`,
+    };
+  }
+
+  const scopes = verified.identity?.scopes ?? [];
+  const broad = broadClassicScopes(scopes);
+  const scopeText =
+    scopes.length === 0
+      ? "none reported (expected for a fine-grained token, which grants per-repository permissions instead of OAuth scopes)"
+      : scopes.join(", ");
+  const rateText =
+    verified.rateLimitRemaining === undefined
+      ? "not reported by GitHub in that response"
+      : `${String(verified.rateLimitRemaining)} request(s) left`;
+
+  const detail = [`scopes: ${scopeText}`, `rate limit remaining: ${rateText}`];
+  if (broad.length > 0) {
+    detail.push(
+      `this classic token carries broad scopes (${broad.join(", ")}) — more authority than a coding agent needs; ` +
+        "a fine-grained, read-only token scoped to specific repositories is the better credential",
+    );
+  }
+
+  return {
+    key: "github-auth",
+    // `warn`, not `ok`, for a working but over-privileged token: the token works,
+    // and that is the problem. Same convention as the permissions check, which
+    // warns about a reachable bash rather than about a broken one.
+    status: broad.length > 0 ? "warn" : "ok",
+    message: `github: ${auth.source} (${masked}) verified as ${verified.identity?.login ?? "an unnamed account"}`,
+    detail: detail.join("; "),
   };
 }
 
@@ -186,10 +287,14 @@ async function sandboxCheck(): Promise<DoctorCheck> {
 }
 
 /**
- * Runs environment diagnostics. All checks are synchronous; git probe uses
- * execFileSync under a try/catch so a missing git never throws.
+ * Runs environment diagnostics.
+ *
+ * Everything except the GitHub check is synchronous and offline: the git probe
+ * uses `execFileSync` under a try/catch so a missing git never throws, and the
+ * temp-dir probe creates and removes its own file. The GitHub check is the one
+ * asynchronous, networked check, and it is the one that can inject a `fetchImpl`.
  */
-export async function runDoctor(): Promise<DoctorReport> {
+export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport> {
   return {
     checks: [
       nodeCheck(),
@@ -197,6 +302,7 @@ export async function runDoctor(): Promise<DoctorReport> {
       dataDirCheck(),
       gitCheck(),
       providersCheck(),
+      await githubAuthCheck(opts),
       permissionsCheck(),
       await sandboxCheck(),
       tmpCheck(),

@@ -8,7 +8,17 @@ import { defaultSettings, getSetting, loadSettings, saveSettings, setSetting, se
 import { listKeyMeta, maskSecret, removeKey, setKey } from "../config/keyring.js";
 import { providerById, PROVIDERS } from "../config/providers.js";
 import { envLayers } from "../config/env.js";
-import { runSetup } from "../config/setup.js";
+import {
+  broadScopeWarning,
+  GITHUB_CREDENTIAL,
+  GITHUB_SHAPE_OVERRIDE_FLAG,
+  readGitHubTokenInput,
+  reportGitHubToken,
+  runSetup,
+  setGitHubToken,
+} from "../config/setup.js";
+import { maskToken } from "../config/redact.js";
+import { resolveGitHubAuth } from "../github/auth.js";
 import { readStdinIfPiped } from "../utils/cli.js";
 import { DEFAULT_SYSTEM_PROMPT, runAgentLoop } from "../agent/loop.js";
 import { appendMessages, createSession, listSessions, loadSession, removeSession, saveSession } from "../agent/session.js";
@@ -261,14 +271,53 @@ const key = program
 key
   .command("set")
   .description("store an API key for a provider")
-  .argument("<provider>", "provider id (openai, anthropic, google, groq, deepseek, mistral, together, xai, azure)")
-  .argument("[key]", "API key; if omitted, read from piped stdin")
-  .action(async (provider: string, keyValue: string | undefined) => {
+  .argument("<provider>", "provider id (openai, anthropic, google, groq, deepseek, mistral, together, xai, azure, github)")
+  .argument("[key]", "API key; if omitted, read from piped stdin. Refused for `github`")
+  .option(
+    GITHUB_SHAPE_OVERRIDE_FLAG,
+    "github only: accept a token whose local format check says `unknown` (skips that check; GitHub still has to accept it)",
+  )
+  .action(async (provider: string, keyValue: string | undefined, opts: { acceptUnrecognisedShape?: boolean }) => {
+    if (provider === GITHUB_CREDENTIAL.id) {
+      // Refused, not warned about. A token in argv is readable by every other
+      // process on the machine through the process list and is replayed by any
+      // later `history`, and the two safe routes cost one extra keystroke.
+      if (keyValue !== undefined) {
+        throw new Error(
+          "refusing to take a GitHub token as a command-line argument: argv is visible to every other process on " +
+            "this machine through the process list, and is recorded in your shell history. Pipe it instead " +
+            '(`printf %s "$GITHUB_TOKEN" | jaa key set github`), or omit it to be prompted with the input hidden.',
+        );
+      }
+      // A pipe is the safe non-interactive route. With neither, `promptHidden`
+      // refuses on a non-TTY rather than falling back to an echoing read.
+      const value = await readGitHubTokenInput();
+      reportGitHubToken(
+        await setGitHubToken(value, {
+          ...(opts.acceptUnrecognisedShape === undefined
+            ? {}
+            : { acceptUnrecognisedShape: opts.acceptUnrecognisedShape }),
+        }),
+      );
+      return;
+    }
+
     const def = providerById(provider);
     if (!def) throw new Error(`unknown provider "${provider}" (see \`jaa key list --help\` or \`jaa setup\`)`);
     if (def.localOnly) throw new Error(`"${provider}" is local-only and needs no key`);
+    if (keyValue !== undefined) {
+      // Still stored — the positional has been the documented way to set a key
+      // for a long time and removing it breaks scripts — but the same argument
+      // leak as `github` applies to an API key, so it says so.
+      process.stderr.write(
+        "jaa: warning: passing a key as a command-line argument puts it in the process list, where any other " +
+          "process on this machine can read it, and in your shell history, where a later `history` replays it. " +
+          'Pipe it instead (`printf %s "$OPENAI_API_KEY" | jaa key set openai`), or omit it to be prompted with ' +
+          "the input hidden.\n",
+      );
+    }
     const value = keyValue ?? (await readStdinIfPiped()) ?? "";
-    if (!value) throw new Error(`no key provided for "${provider}" — pass it as an argument or pipe it on stdin`);
+    if (!value) throw new Error(`no key provided for "${provider}" — pipe it on stdin, or omit it to be prompted`);
     setKey(def, value);
     console.log(`key stored for ${provider} (${maskSecret(value)}) in ~/.jaa/.env`);
   });
@@ -295,6 +344,18 @@ key
         rows.push(`${p.id.padEnd(14)} —`);
       }
     }
+    // Not a member of PROVIDERS, so the loop above cannot reach it — and going
+    // through the resolver rather than the keyring map is the point: the source
+    // can be the process environment, a project `.env`, `~/.jaa/.env` or `gh`,
+    // and an operator looking at a missing row needs to know which one is in
+    // force. `maskToken` is last-four only, the same shape `setGitHubToken`
+    // prints, so a token identified in one command is identifiable in the other.
+    const gh = resolveGitHubAuth();
+    rows.push(
+      gh.token === undefined
+        ? `${GITHUB_CREDENTIAL.id.padEnd(14)} anonymous  —`
+        : `${GITHUB_CREDENTIAL.id.padEnd(14)} ${gh.source.padEnd(9)} ${maskToken(gh.token)}`,
+    );
     console.log(rows.join("\n"));
   });
 
@@ -303,7 +364,9 @@ key
   .description("remove a stored key for a provider")
   .argument("<provider>", "provider id")
   .action((provider: string) => {
-    const def = providerById(provider);
+    // `github` is set-able, so it has to be removable: a credential that can be
+    // installed and not withdrawn through the same command is a trap.
+    const def = provider === GITHUB_CREDENTIAL.id ? GITHUB_CREDENTIAL : providerById(provider);
     if (!def) throw new Error(`unknown provider "${provider}"`);
     const removed = removeKey(def);
     console.log(removed ? `key removed for ${provider}` : `no key stored for ${provider}`);
@@ -345,18 +408,59 @@ program
   .command("setup")
   .description("one-command provider + key configuration")
   .option("--provider <id>", "provider id (skips the picker)")
-  .option("--key <key>", "API key (skips the prompt; omit to pipe on stdin)")
+  .option("--key <key>", "API key (skips the prompt; omit to pipe on stdin). Visible in the process list and shell history")
+  .option(
+    "--github",
+    "configure a GitHub token as part of setup (otherwise you are asked once, on a terminal, if none is configured)",
+  )
+  .option("--skip-github", "do not configure a GitHub token")
+  .option(
+    GITHUB_SHAPE_OVERRIDE_FLAG,
+    "github only: accept a token whose local format check says `unknown` (skips that check; GitHub still has to accept it)",
+  )
   .option("-y, --yes", "fully non-interactive (requires --provider)")
-  .action(async (opts: { provider?: string; key?: string; yes: boolean }) => {
-    if (opts.yes && !opts.provider) throw new Error("non-interactive setup requires --provider");
-    const result = await runSetup({ provider: opts.provider, key: opts.key, nonInteractive: opts.yes });
-    const lines = [
-      `provider configured: ${result.provider}`,
-      `key stored: ${result.keyStored ? "yes" : "no"}`,
-      `default provider: ${result.defaultProviderSet ? result.provider : "unchanged"}`,
-    ];
-    console.log(lines.join("\n"));
-  });
+  .action(
+    async (opts: {
+      provider?: string;
+      key?: string;
+      github?: boolean;
+      skipGithub?: boolean;
+      acceptUnrecognisedShape?: boolean;
+      yes: boolean;
+    }) => {
+      if (opts.yes && !opts.provider) throw new Error("non-interactive setup requires --provider");
+      const result = await runSetup({
+        provider: opts.provider,
+        key: opts.key,
+        nonInteractive: opts.yes,
+        github: opts.skipGithub ? false : opts.github,
+        acceptUnrecognisedShape: opts.acceptUnrecognisedShape,
+      });
+      const lines = [
+        `provider configured: ${result.provider}`,
+        `key stored: ${result.keyStored ? "yes" : "no"}`,
+        `default provider: ${result.defaultProviderSet ? result.provider : "unchanged"}`,
+      ];
+      if (result.github !== undefined) {
+        // Same reporting as `jaa key set github`, minus the "stored" line the
+        // setup summary already implies.
+        lines.push(`github token: verified for ${result.github.login} (${result.github.masked})`);
+        lines.push(
+          `github scopes: ${
+            result.github.scopes.length === 0
+              ? "none reported — a fine-grained token grants per-repository permissions instead of OAuth scopes"
+              : result.github.scopes.join(", ")
+          }`,
+        );
+        if (result.github.rateLimitRemaining !== undefined) {
+          lines.push(`github rate limit: ${String(result.github.rateLimitRemaining)} request(s) left`);
+        }
+        const warning = broadScopeWarning(result.github.broadScopes);
+        if (warning !== undefined) process.stderr.write(`${warning}\n`);
+      }
+      console.log(lines.join("\n"));
+    },
+  );
 
 // --- ask ----------------------------------------------------------------
 program
