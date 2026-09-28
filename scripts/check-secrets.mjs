@@ -36,7 +36,7 @@ const git = (...args) =>
 
 const RULES = [
   { id: "github-classic", re: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/g, why: "GitHub personal access / OAuth token" },
-  { id: "github-fine", re: /\bgithub_pat_[A-Za-z0-9_]{22,}_[A-Za-z0-9]{20,}\b/g, why: "GitHub fine-grained PAT" },
+  { id: "github-fine", re: /\bgithub_pat_[A-Za-z0-9_]{82}\b/g, why: "GitHub fine-grained PAT" },
   { id: "anthropic", re: /\bsk-ant-[A-Za-z0-9_-]{24,}\b/g, why: "Anthropic API key" },
   { id: "aws-akid", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, why: "AWS access key id" },
   { id: "gcp-api-key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g, why: "Google API key" },
