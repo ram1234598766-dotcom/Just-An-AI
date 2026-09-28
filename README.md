@@ -325,16 +325,104 @@ npm run eval            # jaa eval
 
 No ESLint: `tsc --noEmit` is the gate.
 
+## GitHub token
+
+jaa talks to GitHub in three places: installing a skill from a repo, `fetch_url`
+against a GitHub host, and cloning a GitHub remote. All three work with **no
+token at all** — public repos and public URLs are fine anonymously. A token is
+only needed for private repos and for a higher rate limit.
+
+jaa never ships a token, never has a default one, and never writes one into a
+URL, a command line, or a `.git/config`.
+
+### Setting one
+
+```bash
+jaa key set github            # prompts with the input hidden
+printf %s "$TOKEN" | jaa key set github   # or pipe it
+```
+
+`jaa setup` offers the same step on an interactive terminal (`--github` to force
+it, `--skip-github` to decline).
+
+The value is validated for shape, then verified with `GET /user` before
+anything is stored. If verification fails **nothing is written** — a bad token
+never lands in your key file. On success you get the login, the scopes GitHub
+reports, and the last four characters.
+
+**Do not pass a token as a command-line argument.** `argv` is readable by every
+other process on your machine through the process list, and it lands in your
+shell history. `jaa key set github <token>` refuses for that reason, and
+`jaa setup --key` still works but prints a warning saying why you should not use
+it.
+
+### Which token
+
+Prefer a **fine-grained, read-only** token scoped to the specific repositories
+you need. jaa warns when a classic token carries broad scopes (`repo`,
+`workflow`, `admin:org`, `delete_repo`, …) — it does not block them, because you
+may have reasons, but a coding agent does not need write access to your
+repositories.
+
+### Where it is stored
+
+In `<JAA_HOME>/.env` (default `~/.jaa/.env`) as `JAA_GITHUB_TOKEN`, mode `0600`
+on POSIX. There is no OS keyring backend in this codebase, so that file *is* the
+store — the name is historical, not a claim about your OS keychain.
+
+### Where it is looked for
+
+First match wins:
+
+1. `JAA_GITHUB_TOKEN` in the environment
+2. `GITHUB_TOKEN` in the environment
+3. `GH_TOKEN` in the environment
+4. `GITHUB_TOKEN` in the project's `.env`
+5. `~/.jaa/.env` (what `jaa key set github` writes)
+6. `gh auth token`, if the GitHub CLI is installed
+7. nothing — anonymous
+
+`jaa doctor` reports which of these is in use, the masked last four, the scopes,
+and your remaining rate limit. Anonymous is a normal state, not an error: it
+shows as `info`, notes the 60/hour anonymous ceiling against 5,000/hour with a
+token, and says the limit was not read rather than guessing a number.
+
+### What it is and is not used for
+
+- It is attached **only** over `https` to `github.com`, `api.github.com`,
+  `raw.githubusercontent.com` and `codeload.github.com`. Every other host — and
+  every cleartext or SSH URL — gets no header at all.
+- A redirect that leaves that allowlist **loses the header**. It is recomputed
+  per hop rather than carried forward, so a GitHub URL that redirects somewhere
+  else cannot leak it.
+- For git it travels as `GIT_CONFIG_*` environment variables, never as an argv
+  flag and never written to `.git/config`.
+- It never reaches the model: tool output passes through a redaction layer that
+  knows these token shapes, and tool results, session files and transcripts are
+  covered by it.
+- It is not in the sandbox environment passthrough list, so a sandboxed
+  subprocess does not inherit it by accident.
+- **It widens no permission mode.** A token is a credential, not a permission.
+  jaa's rules still decide every write, and a `deny` rule still wins.
+
+### Revoking it
+
+Delete it at <https://github.com/settings/tokens>, then remove it locally:
+
+```bash
+jaa key remove github
+```
+
+`jaa doctor` will report `anonymous` again, and every private-repo feature will
+stop working while public ones carry on. Also unset any shell variable you set
+(`GITHUB_TOKEN`, `GH_TOKEN`) if you exported one, and clear the git credential
+helper if you added one — the token may be cached in more than one place.
+
 ## Secret handling
 
 This repository is public. A credential that reaches a commit reaches everyone
 who clones it, and deleting the file afterwards does **not** remove it from
 history — so prevention is the only thing that actually works here.
-
-Keys are read from `~/.jaa/.env` (mode 0600 on POSIX) or the OS keyring, never
-committed. `.gitignore` excludes `*.env*` (except `.env.example`), `*.key`,
-`*.pem`. Structured logs never contain key material; keyring output masks
-values.
 
 On top of that, `scripts/check-secrets.mjs` refuses a commit that would publish
 a live credential. Install the two hooks once:
@@ -367,3 +455,14 @@ step on every push and pull request — nothing local can skip that.
 Patterns are length-anchored so placeholders like `sk-ant-test` do not trip
 them. If a real non-secret is flagged, add it to the `ALLOW` list **with a
 reason**; do not widen the pattern instead.
+
+## Redaction
+
+Keys are read from `<JAA_HOME>/.env` (mode 0600 on POSIX) and never committed.
+`.gitignore` excludes `*.env*` (except `.env.example`), `*.key`, `*.pem`.
+
+At runtime, `src/config/redact.ts` scrubs known credential shapes from every
+tool result before the model sees it — that is a different job from the commit
+scanner above, and it is what keeps a token from reaching a transcript.
+`jaa key list` and `jaa key set` print only the last four characters of any
+value.
