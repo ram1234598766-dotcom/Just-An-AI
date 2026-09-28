@@ -316,12 +316,54 @@ whitelist before a release (172 files, 102.4 kB tarball).
 
 ```bash
 npm ci
-npm run lint      # tsc --noEmit, strict
-npm test          # vitest run, 161/161 across 16 files
-npm run build     # tsc -> dist/
-npm run eval      # jaa eval
+npm run lint            # tsc --noEmit, strict — the only type gate
+CI=1 npm test           # vitest run
+npm run build           # tsc -> dist/
+npm run check:secrets   # credential scan over the tracked tree
+npm run eval            # jaa eval
 ```
 
-No secrets are ever baked into the repo or the package. `.gitignore` excludes
-`*.env*` (except `.env.example`), `*.key`, `*.pem`. Structured logs never contain
-key material; keyring output masks values.
+No ESLint: `tsc --noEmit` is the gate.
+
+## Secret handling
+
+This repository is public. A credential that reaches a commit reaches everyone
+who clones it, and deleting the file afterwards does **not** remove it from
+history — so prevention is the only thing that actually works here.
+
+Keys are read from `~/.jaa/.env` (mode 0600 on POSIX) or the OS keyring, never
+committed. `.gitignore` excludes `*.env*` (except `.env.example`), `*.key`,
+`*.pem`. Structured logs never contain key material; keyring output masks
+values.
+
+On top of that, `scripts/check-secrets.mjs` refuses a commit that would publish
+a live credential. Install the two hooks once:
+
+```bash
+printf '#!/bin/sh\nexec node "$(git rev-parse --show-toplevel)/scripts/check-secrets.mjs"\n' \
+  > .git/hooks/pre-commit
+printf '#!/bin/sh\nexec node "$(git rev-parse --show-toplevel)/scripts/check-secrets.mjs" --message "$1"\n' \
+  > .git/hooks/commit-msg
+```
+
+- **`pre-commit`** scans the staged blobs — the files that are actually about to
+  be committed, not the working tree, which legitimately holds ignored `.env`
+  files.
+- **`commit-msg`** scans the message. It is a separate hook on purpose: at
+  pre-commit time `COMMIT_EDITMSG` still holds the *previous* commit's message,
+  so checking it there would validate the wrong text.
+- **`--all`** scans every tracked file in the working tree. This is what
+  `npm run check:secrets` and CI run.
+
+The scanner **fails closed**: if it cannot read a file or complete the scan, the
+commit is refused rather than assumed clean. It only ever prints a *masked* form
+of anything it finds, because a scanner that prints the secret becomes a second
+copy of it in your scrollback and in CI logs.
+
+It is a speed bump, not a guarantee. `--no-verify` skips the local hooks, which
+is why `.github/workflows/ci.yml` runs the same scan server-side as its first
+step on every push and pull request — nothing local can skip that.
+
+Patterns are length-anchored so placeholders like `sk-ant-test` do not trip
+them. If a real non-secret is flagged, add it to the `ALLOW` list **with a
+reason**; do not widen the pattern instead.

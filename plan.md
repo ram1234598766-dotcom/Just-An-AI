@@ -146,6 +146,27 @@ activity, and permission prompts that only exist by Phase 19.
 
 ## Decisions (dated)
 
+- **2026-09-28 — Credential scanning is enforced, not just intended.**
+  The repo is public, so a secret that reaches a commit reaches everyone who
+  clones, and deleting the file afterwards does not remove it from history.
+  `scripts/check-secrets.mjs` refuses such a commit, wired as two hooks
+  (`pre-commit` over staged blobs, `commit-msg` over the message — separate
+  because `COMMIT_EDITMSG` still holds the *previous* message at pre-commit
+  time) plus a `--all` mode for the working tree.
+  - *Fails closed.* A tracked file it cannot read, or a scan that cannot finish,
+    refuses the commit rather than reporting clean. This was found by testing:
+    the first `--all` implementation read from `HEAD:`, so in a repo with no
+    commits it scanned zero files and printed "clean" — a false pass, the worst
+    possible failure for a guard. It now reads the checked-out tree.
+  - *Masks what it reports.* A scanner that prints the secret becomes a second
+    copy of it in terminal scrollback and in CI logs.
+  - *Catches the shape that actually happens here:* a credential embedded in a
+    URL, which is how a `git remote` line ends up pasted into a doc.
+  - *Not a guarantee.* `--no-verify` skips the local hooks, so
+    `.github/workflows/ci.yml` runs the same scan server-side as its first step.
+  A full scan of all 28 revisions and 235 text blobs found **0 credentials**; the
+  15 personal absolute paths it did find were removed in `9211eab`, and rewriting
+  them out of history is left as an owner decision.
 - **2026-09-27 — Phases 13 and 14 shipped together in one commit (`e9a81ab`).**
   They share the turn-index contract — `runAgentLoop` tags a checkpoint with the
   1-based *message position* of the assistant message that proposed the call, not

@@ -1,0 +1,52 @@
+name: ci
+
+# This repository is public, so a secret that reaches a commit reaches everyone
+# who clones it, and deleting the file afterwards does not remove it from
+# history. The local pre-commit hook can be bypassed with --no-verify; this
+# cannot, because it runs server-side on the tree that is about to be published.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, so a secret in an old commit is visible to tooling here
+          # even though the scan below reads the checked-out tree.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Runs FIRST and fails the job on a hit, so nothing downstream can
+      # publish a tree that contains a credential.
+      - name: Secret scan
+        run: npm run check:secrets
+
+      - name: Lint (tsc --noEmit is the gate; there is no ESLint)
+        run: npm run lint
+
+      - name: Test
+        run: CI=1 npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit
+        run: npm audit --audit-level=high
+
+      - name: Package contents are the declared whitelist
+        run: npm run pack:dryrun
