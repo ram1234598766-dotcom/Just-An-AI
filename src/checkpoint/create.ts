@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolContext, ToolDefinition } from "../tools/types.js";
 import { confinePath } from "../tools/registry.js";
+import { defaultToolDefinitions } from "../tools/index.js";
 import { MUTATING_TOOLS } from "../permissions/rules.js";
 import { cleanupCheckpoints, listCheckpoints, recordCheckpoint } from "./store.js";
 import { jaaPaths } from "../config/paths.js";
@@ -71,8 +72,17 @@ export function createCheckpoint(
  *
  * {@link createCheckpoint} is the primary entry point: it holds the tool's own
  * schema, so it can tell whether a call names a single file. This variant is for
- * a call site that has only the tool name and the raw arguments, so it validates
- * the arguments itself and then defers to the same confinement and snapshot path.
+ * a call site that has only the tool name and the raw arguments, so it looks the
+ * schema up in the built-in tool set — the same `ToolDefinition` objects
+ * `createRegistry` executes — and validates the arguments against it before
+ * taking the same confinement and snapshot path.
+ *
+ * That lookup is the whole point, not a convenience. A snapshot target has to
+ * come from the shape a tool *declares*, so a `path` the tool does not declare
+ * names nothing: zod strips the keys a schema does not have, and `bash` and
+ * `git_diff` declare no `path` at all. Reading the raw arguments instead recorded
+ * a snapshot for `{ command: "x", path: "f.txt" }` — a file the shell call never
+ * touches — which a later rewind would then write back.
  *
  * Never throws. A checkpoint is a best-effort safety net taken before a tool
  * runs, so failing to take one must not abort the call it was protecting.
@@ -90,9 +100,11 @@ export async function createCheckpointFromTool(
   }
 
   try {
-    const path = targetPathOf(args);
-    // No `path` argument: `bash` and `git_diff` have no single file target, so
-    // there is nothing to snapshot. See createCheckpoint.
+    // The same rule `createCheckpoint` applies to the schema it holds: the target
+    // is read off what the tool declares, never off whatever key the raw
+    // arguments happen to carry. `bash` and `git_diff` declare no `path`, so a
+    // smuggled one names no target and there is nothing to snapshot.
+    const path = targetPathOf(declaredInputOf(toolName, args));
     if (path === undefined) return;
     recordCheckpoint(session, confinePath(ctx, path), turn, toolCallId);
   } catch {
@@ -108,12 +120,13 @@ export async function createCheckpointFromTool(
  *
  * ## Why it checks the store first
  *
- * `listCheckpoints` — and so `cleanupCheckpoints` — reads through
- * `checkpointDir`, which creates the directory it is about to read. Calling this
- * for a session that never snapshotted a file would therefore leave behind the
- * very empty `~/.jaa/checkpoints/<id>/` directory that retention exists to stop
- * accumulating. A store that is not there has nothing to prune, so it is a
- * no-op rather than a freshly created empty one.
+ * `checkpointDir` is pure, and `listCheckpoints` answers an absent store with an
+ * empty list, so `cleanupCheckpoints` would find nothing to prune either way.
+ * The guard is kept because that is a property of the code it happens to call,
+ * not of this function's contract: it says "no store, nothing to prune" here,
+ * where that is what is meant, rather than relying on the read path to keep
+ * saying it. One `existsSync`, on a path that is absent for every session which
+ * never snapshotted a file.
  *
  * Retaining and reclaiming are also this function's only jobs: it never
  * rewinds, and it never removes a session, a snapshot inside the window, or a
@@ -172,4 +185,41 @@ function targetPathOf(input: unknown): string | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
   const path: unknown = (input as { path?: unknown }).path;
   return typeof path === "string" && path !== "" ? path : undefined;
+}
+
+/**
+ * The built-in tools' schemas by name, built on first use.
+ *
+ * `MUTATING_TOOLS` is a closed list of jaa's own tool names, so a miss here
+ * cannot mean an unvalidated third-party tool slipped through: it means the name
+ * is not one of ours, and a name we do not define declares no target.
+ */
+let builtinSchemas: ReadonlyMap<string, ToolDefinition["schema"]> | undefined;
+
+function schemaOf(toolName: string): ToolDefinition["schema"] | undefined {
+  if (builtinSchemas === undefined) {
+    const schemas = new Map<string, ToolDefinition["schema"]>();
+    for (const tool of defaultToolDefinitions()) {
+      // First definition wins rather than throwing on a repeat, because nothing
+      // in this file is allowed to throw at a tool call.
+      if (!schemas.has(tool.name)) schemas.set(tool.name, tool.schema);
+    }
+    builtinSchemas = schemas;
+  }
+  return builtinSchemas.get(toolName);
+}
+
+/**
+ * The arguments as the named tool's own schema defines them.
+ *
+ * `undefined` for a name that is not one of ours and for arguments that do not
+ * fit, because both mean the same thing to the caller: no declared target, so
+ * nothing to snapshot. That is exactly how {@link createCheckpoint} treats the
+ * schema it holds directly, which is the agreement this function exists to keep.
+ */
+function declaredInputOf(toolName: string, args: unknown): unknown {
+  const schema = schemaOf(toolName);
+  if (schema === undefined) return undefined;
+  const parsed = schema.safeParse(args);
+  return parsed.success ? parsed.data : undefined;
 }

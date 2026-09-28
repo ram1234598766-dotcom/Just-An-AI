@@ -49,13 +49,8 @@ export interface RestoreResult {
   errors: string[];
 }
 
-export interface RestoreFilesOptions {
-  preserveCurrent?: boolean;
-}
-
 export interface ForkOptions {
   targetTurn?: number;
-  restore?: boolean;
 }
 
 export interface ForkResult {
@@ -72,53 +67,10 @@ export interface CheckpointDisplayInfo {
   filesAffected: number;
 }
 
-/** Union type for all checkpoint-related operations */
-export type CheckpointOperation =
-  | { type: "restore"; turn: number; options?: RestoreFilesOptions }
-  | { type: "fork"; turn?: number; restore?: boolean }
-  | { type: "list"; limit?: number };
-
-/** Status of a checkpoint restoration operation */
-export interface CheckpointStatus {
-  turn: number;
-  filePath: string;
-  toolCallId: string;
-  status: "restored" | "skipped" | "error";
-  message?: string;
-}
-
-/** Statistics about checkpoint storage */
-export interface CheckpointStats {
-  totalSessions: number;
-  totalCheckpoints: number;
-  totalFiles: number;
-  oldestCheckpoint?: string;
-  newestCheckpoint?: string;
-}
-
 /** Configuration for checkpoint retention */
 export interface CheckpointConfig {
   retentionDays?: number;
   maxCheckpointsPerSession?: number;
   autoCleanup?: boolean;
   enabled?: boolean;
-}
-
-/** Event types for checkpoint system */
-export type CheckpointEvent =
-  | { type: "checkpoint-created"; session: Session; filePath: string; turn: number }
-  | { type: "checkpoint-restored"; session: Session; turn: number; filesRestored: number }
-  | { type: "session-forked"; sourceSession: Session; forkedSession: Session; turn: number }
-  | { type: "checkpoint-cleanup"; session: Session; cleanedFiles: number };
-
-/** Payload for checkpoint events */
-export interface CheckpointEventPayload {
-  hookEventName: string;
-  sessionId: string;
-  timestamp: string;
-  turn: number;
-  filePath?: string;
-  filesRestored?: number;
-  sourceSessionId?: string;
-  forkedSessionId?: string;
 }

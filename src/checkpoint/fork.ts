@@ -21,8 +21,11 @@ import type { CheckpointTurnInfo, ForkOptions, ForkResult, ForkableTurn } from "
  * `restoreMessagesToTurn` uses. An out-of-range turn yields an empty transcript
  * plus an error rather than a silent full copy.
  *
- * `options.restore` is honoured by {@link forkAndRestore}; this function only
- * ever branches the transcript, so it reports `restored: false`.
+ * This function only ever branches the transcript, so it reports
+ * `restored: false`. Rewinding the working tree is {@link forkAndRestore}'s
+ * job, and the caller picks between the two: a flag on their shared options
+ * could not say which of them it was called, so it could never be honoured
+ * either way.
  */
 export function forkSession(session: Session, options: ForkOptions = {}): ForkResult {
   const errors: string[] = [];
