@@ -1,6 +1,7 @@
 import { McpServer } from "../mcp/server.js";
 import { createDefaultRegistry } from "../tools/index.js";
 import type { ToolContext } from "../tools/types.js";
+import { getPkgInfo } from "../version.js";
 
 /**
  * Create and configure an MCP server that exposes jaa's built-in tools
@@ -9,7 +10,10 @@ import type { ToolContext } from "../tools/types.js";
  * the current working directory.
  */
 export function createJaaMcpServer(allowBash = false): McpServer {
-  const server = new McpServer({ name: "jaa", version: "0.1.0" });
+  // Read from package.json rather than repeating the literal: a hardcoded
+  // version drifts the moment the package is bumped, and this string is what an
+  // MCP client sees when it asks the server what it is.
+  const server = new McpServer({ name: "jaa", version: getPkgInfo().version });
   const registry = createDefaultRegistry();
   const toolCtx: ToolContext = {
     root: process.cwd(),

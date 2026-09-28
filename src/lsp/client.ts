@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { encodeFrame, decodeFrames } from "./framing.js";
+import { getPkgInfo } from "../version.js";
 import type {
   LspInitializeParams,
   LspServerCapabilities,
@@ -133,7 +134,7 @@ export class LspClient {
     try {
       const initParams: LspInitializeParams = {
         processId: process.pid,
-        clientInfo: { name: "jaa", version: "0.1.0" },
+        clientInfo: { name: "jaa", version: getPkgInfo().version },
         capabilities: {
           textDocument: {
             diagnostic: {},

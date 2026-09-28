@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { encodeFrame, decodeFrames, type McpMessage } from "./framing.js";
 import { isRecord, isRequestId } from "./validation.js";
+import { getPkgInfo } from "../version.js";
 import type {
   McpInitializeResult,
   McpRequestId,
@@ -160,7 +161,7 @@ export class McpClient {
       const result = await this.send<unknown>("initialize", {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "jaa", version: "0.1.0" },
+        clientInfo: { name: "jaa", version: getPkgInfo().version },
       });
       const initializeResult = parseInitializeResult(result);
       this.serverInfo = initializeResult.serverInfo;
