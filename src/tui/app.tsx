@@ -61,13 +61,14 @@ export interface ChatAppProps {
   /**
    * Rewind as a dry run: report what a restore would do and write nothing.
    *
-   * `preserveCurrent` in the Phase 14 helpers guards the stored transcript
-   * only — `restoreFilesToTurn` ignores it and writes the working tree either
-   * way — so the TUI never calls restore with it set. It is honoured here as
-   * "preview", which is the only reading that cannot overwrite a file by
-   * accident.
+   * Named for what it does here, not after the Phase 14 helper option it
+   * resembles. `restoreFilesToTurn`'s `preserveCurrent` guards the stored
+   * transcript only — that helper ignores it and writes the working tree either
+   * way — so the TUI never calls restore with it set. What the helpers call
+   * `reportOnly` is what this is: a preview, which is the only reading that
+   * cannot overwrite a file by accident.
    */
-  preserveCurrent?: boolean;
+  previewOnly?: boolean;
   /** Root a rewind is confined to. Defaults to the process working directory. */
   toolContext?: ToolContext;
   /**
@@ -404,7 +405,7 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
         return;
       }
 
-      if (props.preserveCurrent === true) {
+      if (props.previewOnly === true) {
         addLines([["assistant", previewText(turn, files, dropped)]]);
         return;
       }
