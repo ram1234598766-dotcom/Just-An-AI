@@ -18,10 +18,22 @@ import type { CheckpointConfig } from "./types.js";
 
 const CHECKPOINTS_DIR = "checkpoints";
 
-/** Get the base directory for a session's checkpoints. */
+/**
+ * The base directory for a session's checkpoints.
+ *
+ * Pure: it computes a path and does not touch the filesystem. A read must not
+ * create a store, or listing a session that never snapshotted a file would
+ * leave behind an empty `~/.jaa/checkpoints/<id>/` — one per run, forever,
+ * since the TUI lists checkpoints on mount. Only {@link recordCheckpoint}
+ * creates the directory.
+ */
 export function checkpointDir(session: Session): string {
-  const base = jaaPaths();
-  const dir = join(base.root, CHECKPOINTS_DIR, session.id);
+  return join(jaaPaths().root, CHECKPOINTS_DIR, session.id);
+}
+
+/** Create the session's checkpoint directory, if it is not already there. */
+function ensureCheckpointDir(session: Session): string {
+  const dir = checkpointDir(session);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -62,7 +74,8 @@ export function recordCheckpoint(
   toolCallId: string,
 ): void {
   const content = readFileSync(filePath, "utf8");
-  const path = join(checkpointDir(session), `${hashContent(content)}.json`);
+  // The only write path, so it is the only one that creates the store.
+  const path = join(ensureCheckpointDir(session), `${hashContent(content)}.json`);
   if (existsSync(path)) return; // Already checkpointed
 
   const data: CheckpointData = {
@@ -81,6 +94,21 @@ export function recordCheckpoint(
  *
  * Each entry includes the file, turn, tool-call id, and timestamp so the TUI
  * can render a meaningful summary per turn.
+ *
+ * A snapshot is on-disk state that may have been hand-edited, truncated, or
+ * written by a version with a different shape, so a file that does not parse
+ * as a checkpoint is skipped rather than surfaced. Unparseable JSON was already
+ * skipped by the `catch`; the guard closes the same hole for JSON that parses
+ * to the wrong shape. It matters because the sort below reads `timestamp` and
+ * `turn` off every entry: a snapshot missing `timestamp` would otherwise throw
+ * `localeCompare` out of the sort, so one bad file broke the whole listing —
+ * and with it the rewind picker, which lists on mount.
+ *
+ * The guard checks exactly the fields a {@link CheckpointEntry} carries, not
+ * `content`. Whether a snapshot holds restorable bytes is a question for the
+ * write path, which owns it and validates again in `restore.ts`; a snapshot
+ * that lists and is then refused there is reported as an error, where a
+ * snapshot silently dropped here would be invisible.
  */
 export function listCheckpoints(session: Session): CheckpointEntry[] {
   const dir = checkpointDir(session);
@@ -93,12 +121,13 @@ export function listCheckpoints(session: Session): CheckpointEntry[] {
     if (!file.isFile() || !file.name.endsWith(".json")) continue;
 
     try {
-      const data = JSON.parse(readFileSync(join(dir, file.name), "utf8")) as CheckpointData;
+      const parsed: unknown = JSON.parse(readFileSync(join(dir, file.name), "utf8"));
+      if (!isCheckpointEntry(parsed)) continue;
       entries.push({
-        file: data.file,
-        turn: data.turn,
-        toolCallId: data.toolCallId,
-        timestamp: data.timestamp,
+        file: parsed.file,
+        turn: parsed.turn,
+        toolCallId: parsed.toolCallId,
+        timestamp: parsed.timestamp,
         path: file.name,
       });
     } catch {
@@ -110,6 +139,29 @@ export function listCheckpoints(session: Session): CheckpointEntry[] {
 
   entries.sort((a, b) => (b.turn - a.turn) || b.timestamp.localeCompare(a.timestamp));
   return entries;
+}
+
+/**
+ * The shape `listCheckpoints` needs in order to list and order an entry.
+ *
+ * Mirrors the guard `restore.ts` applies before writing, minus `content`: see
+ * `listCheckpoints` for why the two are not the same check.
+ */
+function isCheckpointEntry(value: unknown): value is Omit<CheckpointEntry, "path"> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.file === "string" &&
+    record.file !== "" &&
+    // `turn` is subtracted in the sort, so a non-finite value would make the
+    // comparator return NaN and leave the order unspecified.
+    typeof record.turn === "number" &&
+    Number.isFinite(record.turn) &&
+    typeof record.toolCallId === "string" &&
+    // Compared with `localeCompare` in the sort; absent is the case that
+    // originally threw out of it.
+    typeof record.timestamp === "string"
+  );
 }
 
 /**

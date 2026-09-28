@@ -9,7 +9,7 @@ import { MUTATING_TOOLS } from "../src/permissions/rules.js";
 import { defaultToolDefinitions } from "../src/tools/index.js";
 import type { ToolContext, ToolDefinition } from "../src/tools/types.js";
 import { checkpointDir, cleanupCheckpoints, DEFAULT_MAX_CHECKPOINTS_PER_SESSION, hashFile, listCheckpoints, recordCheckpoint, snapshotPath } from "../src/checkpoint/store.js";
-import { cleanupSessionCheckpoints, createCheckpoint, createCheckpointFromTool } from "../src/checkpoint/create.js";
+import { cleanupSessionCheckpoints, createCheckpoint, createCheckpointFromTool, getCheckpointInfo, validateCheckpointForRestore } from "../src/checkpoint/create.js";
 import { restoreFilesToTurn, restoreMessagesToTurn, restoreToTurn } from "../src/checkpoint/restore.js";
 import { forkSession } from "../src/checkpoint/fork.js";
 import type { CheckpointConfig } from "../src/checkpoint/types.js";
@@ -71,9 +71,18 @@ function read(abs: string): string {
   return readFileSync(abs, "utf8");
 }
 
-/** The `<hash>.json` snapshots currently on disk for a session. */
+/**
+ * The `<hash>.json` snapshots currently on disk for a session.
+ *
+ * A store that was never created holds no snapshots, so the answer is the empty
+ * list rather than a `scandir` failure. The tests that use this to assert that
+ * *nothing* was stored are asking exactly this question of a session whose only
+ * calls were refused, so it has to have an answer for a store that is not there.
+ */
 function storedSnapshots(session: Session): string[] {
-  return readdirSync(checkpointDir(session))
+  const dir = checkpointDir(session);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
     .filter((name) => name.endsWith(".json"))
     .sort();
 }
@@ -94,9 +103,23 @@ function commit(session: Session, file: string, turn: number, toolCallId: string
  */
 function plantSnapshot(session: Session, file: string, turn: number, content: string): string {
   const name = `planted-${planted++}.json`;
-  const abs = join(checkpointDir(session), name);
+  const abs = join(ensureStoreDir(session), name);
   writeFileSync(abs, `${JSON.stringify({ file, turn, toolCallId: "planted", timestamp: "2026-01-01T00:00:00.000Z", content })}\n`, "utf8");
   return abs;
+}
+
+/**
+ * The session's store directory, created if absent.
+ *
+ * `checkpointDir` is pure — it no longer creates what it returns — so a test
+ * that plants files straight into the store, having no write of its own to
+ * bring the directory into being, has to create it. Tests that want to observe
+ * the directory's absence use `checkpointDir` for that instead.
+ */
+function ensureStoreDir(session: Session): string {
+  const dir = checkpointDir(session);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 // A file's content on either side of each write in the scenarios below. The
@@ -786,15 +809,14 @@ describe("tools with no single file target", () => {
     const session = createSession();
     const file = writeInRoot("untouched.txt", "body\n");
 
-    // The raw-argument entry point has no schema to strip against, so it is
-    // exercised with the calls these two tools actually receive.
-    const raw: { name: string; args: unknown }[] = [
-      { name: "bash", args: { command: "rm -rf /" } },
-      { name: "bash", args: { command: "echo hi", timeoutMs: 1000 } },
-      { name: "git_diff", args: {} },
-      { name: "git_diff", args: { staged: true } },
-    ];
-    for (const call of raw) {
+    // The same calls the schema-holding entry point refuses, including the
+    // smuggled `path`. This entry point looks the schema up by name rather than
+    // reading the raw arguments, so a `path` the tool does not declare is
+    // stripped before the target is read and names nothing. Reading `args.path`
+    // directly made `{ command: "echo hi", path: "untouched.txt" }` record a
+    // snapshot of a file a shell call never touches, which a rewind would then
+    // write back.
+    for (const call of CALLS) {
       await expect(
         createCheckpointFromTool(session, call.name, "call-x", 1, ctx, call.args),
         `${call.name} ${JSON.stringify(call.args)}`,
@@ -806,6 +828,27 @@ describe("tools with no single file target", () => {
     expect(read(file)).toBe("body\n");
   });
 
+  it("still snapshots a declared path when only the name and raw arguments are known", async () => {
+    // The other direction: the lookup must not cost a real write its snapshot.
+    // If it did, `bash` and `git_diff` falling out would be a bug shared with
+    // every tool that does declare a `path`. Two files with two *different*
+    // bodies, because the store is content-addressed: identical bytes are one
+    // snapshot for the whole session, and reusing them would test that instead.
+    const session = createSession();
+    const written = writeInRoot("declared.txt", "body\n");
+    const patched = writeInRoot("patched.txt", "other\n");
+
+    await createCheckpointFromTool(session, "write_file", "call-y", 1, ctx, { path: "declared.txt", content: "next\n" });
+    await createCheckpointFromTool(session, "patch", "call-z", 1, ctx, {
+      path: "patched.txt",
+      hunks: [{ oldText: "other", newText: "replaced" }],
+    });
+
+    expect(listCheckpoints(session).map((cp) => cp.toolCallId).sort()).toEqual(["call-y", "call-z"]);
+    expect(read(written)).toBe("body\n");
+    expect(read(patched)).toBe("other\n");
+  });
+
   it("keeps bash side effects out of scope rather than half-snapshotting them", () => {
     // Bash can touch anything, so there is no single file to record. The spec
     // puts this out of scope explicitly, and the store reflects that: a
@@ -815,6 +858,111 @@ describe("tools with no single file target", () => {
     createCheckpoint(session, tool("bash"), { command: "touch made-by-bash.txt" }, ctx, 1, "call-bash");
     expect(existsSync(created)).toBe(false);
     expect(listCheckpoints(session)).toEqual([]);
+  });
+});
+
+describe("corrupt store", () => {
+  it("lists a store holding only unparseable and wrong-shaped snapshots instead of throwing", () => {
+    // The listing sorts on `turn` and `timestamp`, so a snapshot missing either
+    // used to throw out of the sort and take the whole listing with it — which
+    // is the rewind picker, since the TUI lists on mount. Every field the entry
+    // needs is checked instead, and a file that fails the check is skipped.
+    const session = createSession();
+    const good = writeInRoot("good.txt", "good v0\n");
+    commit(session, good, 1, "call-good", "good v1\n");
+    // Proves the store is not merely empty: the good snapshot still lists, and
+    // ordering survives the malformed files around it.
+    recordCheckpoint(session, writeInRoot("good2.txt", "second\n"), 2, "call-good2");
+
+    const dir = ensureStoreDir(session);
+    const malformed: { name: string; body: unknown }[] = [
+      { name: "no-timestamp.json", body: { file: "a.txt", turn: 1, toolCallId: "x", content: "c" } },
+      { name: "no-turn.json", body: { file: "a.txt", toolCallId: "x", timestamp: "2026-01-01T00:00:00.000Z", content: "c" } },
+      { name: "no-file.json", body: { turn: 1, toolCallId: "x", timestamp: "2026-01-01T00:00:00.000Z", content: "c" } },
+      { name: "empty-file.json", body: { file: "", turn: 1, toolCallId: "x", timestamp: "2026-01-01T00:00:00.000Z", content: "c" } },
+      { name: "turn-not-a-number.json", body: { file: "a.txt", turn: "1", toolCallId: "x", timestamp: "2026-01-01T00:00:00.000Z", content: "c" } },
+      { name: "turn-not-finite.json", body: { file: "a.txt", turn: 1e999, toolCallId: "x", timestamp: "2026-01-01T00:00:00.000Z", content: "c" } },
+      { name: "timestamp-not-a-string.json", body: { file: "a.txt", turn: 1, toolCallId: "x", timestamp: 1756089600000, content: "c" } },
+      { name: "tool-call-id-missing.json", body: { file: "a.txt", turn: 1, timestamp: "2026-01-01T00:00:00.000Z", content: "c" } },
+      { name: "array.json", body: [{ file: "a.txt", turn: 1, toolCallId: "x", timestamp: "2026-01-01T00:00:00.000Z" }] },
+      { name: "null.json", body: null },
+      { name: "scalar.json", body: 7 },
+    ];
+    for (const { name, body } of malformed) {
+      writeFileSync(join(dir, name), JSON.stringify(body), "utf8");
+    }
+    writeFileSync(join(dir, "truncated.json"), '{"file":"a.txt","turn":1', "utf8");
+
+    // The one that has to keep listing: it is JSON, has every field the listing
+    // needs, and simply has no `content`. It lists, and the write path refuses
+    // it and says so, rather than it vanishing from the report entirely.
+    const shallow = plantSnapshot(session, join(root, "shallow.txt"), 5, "");
+    writeFileSync(
+      shallow,
+      JSON.stringify({ file: join(root, "shallow.txt"), turn: 5, toolCallId: "planted", timestamp: "2026-01-01T00:00:00.000Z" }),
+      "utf8",
+    );
+
+    const listed = listCheckpoints(session);
+    expect(listed.map((c) => c.turn).sort((a, b) => a - b)).toEqual([1, 2, 5]);
+    // Every listed entry is usable by the callers: the TUI's picker and the
+    // fork helper read exactly these fields.
+    for (const entry of listed) {
+      expect([typeof entry.file, typeof entry.turn, typeof entry.toolCallId, typeof entry.timestamp, typeof entry.path]).toEqual([
+        "string", "number", "string", "string", "string",
+      ]);
+      expect(Number.isNaN(new Date(entry.timestamp).getTime()), entry.timestamp).toBe(false);
+    }
+
+    // A skipped snapshot is still on disk, so overwriting one cannot be a way to
+    // destroy the others, and retention still leaves junk alone.
+    expect(cleanupCheckpoints(session, { maxCheckpointsPerSession: 1 })).toBe(2);
+    for (const { name } of malformed) expect(existsSync(join(dir, name)), name).toBe(true);
+    expect(existsSync(join(dir, "truncated.json"))).toBe(true);
+  });
+
+  it("reports a wrong-shaped snapshot as an error rather than dropping it silently", () => {
+    // The complement of skipping at the listing: a snapshot that lists and then
+    // cannot be restored is surfaced by the write path, so a rewind never
+    // claims to have restored something it could not.
+    const session = createSession();
+    const good = writeInRoot("good.txt", "good v0\n");
+    commit(session, good, 1, "call-good", "good v1\n");
+    writeFileSync(
+      join(ensureStoreDir(session), "shallow.json"),
+      JSON.stringify({ file: join(root, "shallow.txt"), turn: 1, toolCallId: "shallow", timestamp: "2026-01-01T00:00:00.000Z" }),
+      "utf8",
+    );
+
+    const result = restoreFilesToTurn(session, 0, ctx);
+    expect(result.errors).toHaveLength(1);
+    expect(need(result.errors[0], "errors[0]")).toMatch(/not a readable checkpoint/);
+    expect(result.restored.map((r) => basename(r.filePath))).toEqual(["good.txt"]);
+    expect(read(good)).toBe("good v0\n");
+  });
+
+  it("lists and prunes without creating a store for a session that never wrote one", () => {
+    // The TUI lists checkpoints on mount, so a read that creates the directory
+    // leaves an empty ~/.jaa/checkpoints/<id>/ behind for every session that
+    // never snapshotted a file. Only a write may bring the store into being.
+    const session = createSession();
+    const store = join(tmp, "checkpoints", session.id);
+    expect(existsSync(store)).toBe(false);
+
+    expect(listCheckpoints(session)).toEqual([]);
+    expect(existsSync(store)).toBe(false);
+    // Two reads, and the directory the TUI opens still does not exist.
+    expect(listCheckpoints(session)).toEqual([]);
+    expect(getCheckpointInfo(session).total).toBe(0);
+    expect(validateCheckpointForRestore(session, 1)).toBe(false);
+    expect(cleanupCheckpoints(session)).toBe(0);
+    expect(existsSync(store)).toBe(false);
+
+    // A write creates it, and the snapshot is readable straight afterwards.
+    const file = writeInRoot("first.txt", "v0\n");
+    recordCheckpoint(session, file, 1, "call-1");
+    expect(existsSync(store)).toBe(true);
+    expect(listCheckpoints(session).map((c) => c.turn)).toEqual([1]);
   });
 });
 
