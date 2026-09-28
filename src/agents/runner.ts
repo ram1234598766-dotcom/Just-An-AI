@@ -5,6 +5,9 @@ import { resolveModel } from "../providers/router.js";
 import type { ChatMessage, ToolCall } from "../providers/types.js";
 import type { ToolContext } from "../tools/types.js";
 import type { SandboxEnforcement } from "../sandbox/types.js";
+import type { ValidatedHookEntry } from "../hooks/types.js";
+import type { PermissionMode } from "../permissions/types.js";
+import type { Session } from "../agent/session.js";
 
 export interface SubagentOptions {
   /** The task to give the subagent. */
@@ -46,6 +49,35 @@ export interface SubagentOptions {
   executeTool?: (
     inner: (call: ToolCall) => Promise<string>,
   ) => (call: ToolCall) => Promise<string>;
+  /**
+   * Phase 13: the validated hook entries a subagent's tool calls are gated by.
+   *
+   * Omitted — or empty — and no hook is ever fired, which leaves the pre-Phase-13
+   * path unchanged, so a caller that knows nothing about hooks needs to do
+   * nothing. `jaa ask` and `jaa chat` pass the same `loadAllHooks(...).entries`
+   * they pass to their own loop, so a `PreToolUse` rule that blocks a tool in the
+   * parent blocks it in the subagent too: a subagent is not a way around a hook.
+   *
+   * Deliberately not defaulted here. Wiring the chain for every caller would fire
+   * `SessionStart`/`Stop` around the `agent` hook handler's own one-shot
+   * subagent, and would recurse through it; the call site decides instead.
+   */
+  hookEntries?: ValidatedHookEntry[];
+  /** `sessionId` in every hook payload. Defaults to the loop's own `"jaa"`. */
+  hookSessionId?: string;
+  /** The permission mode the subagent's tool calls are actually gated under. */
+  permissionMode?: PermissionMode;
+  /**
+   * Phase 14: the session a subagent's file snapshots belong to. Its id names the
+   * `~/.jaa/checkpoints/<id>/` store, so without it there is nowhere to snapshot
+   * to and `jaa rewind` cannot reach a subagent's writes.
+   *
+   * The confined root is taken from this run's own `toolContext`, not from the
+   * caller: a snapshot is only ever taken for a path the subagent's tools are
+   * already confined to, so it cannot become a way to read outside the root the
+   * writes are limited to.
+   */
+  checkpointSession?: Session;
 }
 
 export interface SubagentResult extends AgentLoopResult {
@@ -74,6 +106,24 @@ export function buildAgentSystemPrompt(projectContext: string, spec: AgentSpec):
  * The subagent gets the combined project context + agent instructions as its
  * system prompt, its own tool registry (bash gated off by default), and the
  * provided task as its first user message.
+ *
+ * ## The safety posture does not move when hooks or checkpoints are wired in
+ *
+ * Neither of them grants anything. `hookEntries` and `checkpointSession` are
+ * passed to the loop, which is the same pair `jaa ask` hands its own run, and the
+ * loop applies them at fixed points that this module does not control:
+ *
+ *   - The registry and `toolContext` above are built before either is wired, so
+ *     `allowBash` stays whatever the caller said (default false) and
+ *     `sandboxEnforcement` stays `require`. Nothing here can widen them.
+ *   - A snapshot only reads a file the call is about to write, through the same
+ *     `confinePath` and `MUTATING_TOOLS` list `ask` uses, and only for a tool
+ *     whose own schema names a single `path` — so `bash` and `git_diff` still
+ *     snapshot nothing, and no command is executed to take one.
+ *   - A `PreToolUse` deny is resolved by the loop *before* the call reaches
+ *     `executeTool`, which is where this module's permission-gate wrapper and the
+ *     registry both sit. So a denied call never reaches the gate, never reaches a
+ *     tool, and is not snapshotted on the way.
  */
 export async function runSubagent(
   agents: ParsedAgents,
@@ -105,6 +155,8 @@ export async function runSubagent(
     { role: "user", content: opts.task },
   ];
 
+  const hookEntries = opts.hookEntries ?? [];
+
   const loopOptions: Parameters<typeof runAgentLoop>[0] = {
     model,
     messages,
@@ -116,6 +168,28 @@ export async function runSubagent(
     ...(opts.numContext !== undefined ? { numContext: opts.numContext } : {}),
     ...(opts.onAssistantMessage !== undefined ? { onAssistantMessage: opts.onAssistantMessage } : {}),
     ...(opts.onToolResult !== undefined ? { onToolResult: opts.onToolResult } : {}),
+    // Phase 13: omitted entirely when no layer declares a hook, which is the same
+    // rule `ask` and `chat` follow — so a host with no hooks keeps the loop's
+    // no-wiring path and no `SessionStart`/`Stop` round trip.
+    ...(hookEntries.length > 0
+      ? {
+          hooks: {
+            entries: hookEntries,
+            // The real session and the real workspace, not the loop's placeholders.
+            ...(opts.hookSessionId !== undefined ? { sessionId: opts.hookSessionId } : {}),
+            cwd: toolContext.cwd,
+            root: toolContext.root,
+            // The policy the call was gated under, so a handler sees the mode that
+            // actually decided it rather than no mode at all.
+            ...(opts.permissionMode !== undefined ? { permissionMode: opts.permissionMode } : {}),
+          },
+        }
+      : {}),
+    // Phase 14: snapshots into the session the caller named, confined to this
+    // run's own root. With no mutating tool call, nothing is written.
+    ...(opts.checkpointSession !== undefined
+      ? { checkpoints: { session: opts.checkpointSession, ctx: toolContext } }
+      : {}),
   };
 
   const loopResult = await runAgentLoop(loopOptions);
