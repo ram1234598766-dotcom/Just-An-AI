@@ -142,10 +142,27 @@ consent.
 
 ## Sandbox
 
-Path validation is not containment. `confinePath` stops a tool from *naming* a
-path outside the workspace; it cannot stop a process from opening one. Every
-command-executing tool therefore goes through `runProcess`, which wraps it in an
-OS sandbox when the host has one.
+Path confinement is decided on the **real location**, not on the spelling.
+`confinePath` resolves a path and refuses any whose real location — the one the
+filesystem reports — escapes the workspace root. `..` and absolute paths are
+resolved away first, then `realpathSync.native` expands symlinks, Windows
+junctions and 8.3 aliases on every call, and containment is tested between the
+two *resolved* locations. A symlink or junction planted inside the workspace is
+therefore no longer a write primitive out of it, and a path the filesystem cannot
+resolve at all is refused rather than guessed at. Two limits remain:
+
+- **Between the check and the open.** The location is resolved before the file
+  is opened, so another process replacing the resolved path with a link in that
+  window is a race this check does not close.
+- **A file that does not exist yet.** A write is asked about a file it is about
+  to create, so the path is resolved through its deepest existing ancestor and
+  the missing tail re-appended. Every existing ancestor has been resolved, so
+  the tail cannot itself hide a link.
+
+Path confinement is not process confinement. `confinePath` stops a tool from
+reaching a path outside the workspace; it cannot stop a process once it runs.
+Every command-executing tool therefore goes through `runProcess`, which wraps it
+in an OS sandbox when the host has one.
 
 | Platform | Mechanism | What it enforces |
 |----------|-----------|------------------|
@@ -229,10 +246,11 @@ Precedence: process env > project `.env` > `~/.jaa/.env`. Local providers
 ## Tools
 
 Path-confined and, where the host allows it, OS-sandboxed. All paths are checked
-against the workspace root by `confinePath` (absolute paths and `..` traversal
-blocked, null-byte guard). Output is clamped to 80 KB per tool result. See
-[Sandbox](#sandbox) for containment, which is a separate and stronger guarantee
-than path validation.
+against the workspace root by `confinePath`, on the real location rather than the
+spelling: `..` and absolute paths resolved away, then symlinks, Windows junctions
+and 8.3 aliases expanded, plus a null-byte guard. Output is clamped to 80 KB per
+tool result. See [Sandbox](#sandbox) for process containment, which is a separate
+and stronger guarantee than path confinement.
 
 | Tool | Description |
 |------|-------------|
