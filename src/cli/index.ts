@@ -26,6 +26,7 @@ import { McpClient, allMcpTools, executeMcpTool } from "../mcp/index.js";
 import type { ResolvedModel } from "../providers/types.js";
 import type { ToolExecutor } from "../agent/loop.js";
 import type { HookHandler, ValidatedHookEntry } from "../hooks/types.js";
+import type { HookSource } from "../hooks/load.js";
 
 const pkg = getPkgInfo();
 
@@ -88,31 +89,99 @@ function hookTarget(handler: HookHandler): string {
 }
 
 /**
- * Re-run a config layer's `hooks` key through the real validator and report what
- * failed.
+ * The one thing `loadAllHooks` cannot report about a layer by itself: a layer
+ * whose top level is unreadable.
  *
- * `loadAllHooks` deliberately swallows a layer that does not parse: one typo
- * must not take the whole chain down. That is the right call at run time and
- * the wrong answer to "why is my hook not firing", because a layer that fails
- * to parse contributes no entries and so is simply absent from the listing. The
- * validation is `parseHookConfig` itself, so the messages are the loader's own,
- * not a second opinion; only the file read is repeated.
+ * `readJsonHookLayer` returns an empty layer in silence when a file is not JSON
+ * — it has nothing about hook config to say, so it leaves the diagnosis here.
+ * Everything else it *does* report, through `warnings`: a skipped group, a
+ * skipped handler, an event declared with the wrong shape, a `hooks` key that is
+ * not an object. So this returns `[]` for all of those, and a line only when the
+ * whole file is out.
+ *
+ * The distinction is the whole reason it exists, because the two states are
+ * opposites and need opposite advice. "No hook in this file was loaded" sends an
+ * operator hunting for a missing or renamed file. "This group was skipped"
+ * sends them to the typo, with every sibling hook in the file still in force —
+ * which is what actually happened, since the loader parses group by group and
+ * keeps everything that validates.
+ *
+ * The `hooks`-is-not-an-object branch mirrors `parseHookConfigResilient`'s own
+ * condition, minus its absent/null early return, so a `{"hooks": null}` is not
+ * reported here either: the loader treats that as "no hooks", and so does this.
  */
-async function hookConfigErrors(path: string, label: string): Promise<string[]> {
+function unreadableHookLayer(path: string, label: string): string[] {
   if (!existsSync(path)) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    return [`${label}: not valid JSON (${err instanceof Error ? err.message : String(err)})`];
+    return [
+      `${label}: not valid JSON (${err instanceof Error ? err.message : String(err)}) — no hook in this file was loaded`,
+    ];
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-  const raw = (parsed as Record<string, unknown>).hooks;
-  if (raw === undefined) return [];
-  const { parseHookConfig } = await import("../hooks/types.js");
-  const result = parseHookConfig(raw);
-  if (result.ok) return [];
-  return [`${label}: ${result.errors.length} invalid hook entry/entries`, ...result.errors.map((e) => `  ${e}`)];
+  const hooks = (parsed as Record<string, unknown>).hooks;
+  if (hooks === undefined || hooks === null) return [];
+  if (typeof hooks !== "object" || Array.isArray(hooks)) {
+    return [
+      `${label}: the \`hooks\` key is not an object mapping event names to hook groups — no hook in this file was loaded`,
+    ];
+  }
+  return [];
+}
+
+/** Indent every line of a warning, so a multi-line one reads as a single block. */
+function indentBlock(text: string, pad = "  "): string {
+  return text
+    .split("\n")
+    .map((line) => `${pad}${line}\n`)
+    .join("");
+}
+
+/**
+ * Every hook layer a run or an inspection should honour, split into what loaded
+ * and what did not.
+ *
+ * One loader, one answer: `jaa ask`, `jaa chat`, `jaa agent run`,
+ * `jaa hooks list` and `jaa hooks test` all come through here, so no two of them
+ * can describe the same config differently — and so a caller cannot print one
+ * loader's answer with another's wording.
+ *
+ * `trustProjectClaudeSettings` follows the flag and nothing else. A project
+ * `.claude/settings.json` lives inside a cloned repository, so the loader only
+ * applies it for a caller that has been told the project is trusted. Every
+ * command that runs hooks — `jaa hooks list|test`, `jaa ask`, `jaa chat`,
+ * `jaa agent run` — exposes the same `--trust-project-settings` opt-in and all of
+ * them default to not applying it. There is no prompt and no second mechanism,
+ * so a run can never honour a project layer that `jaa hooks list` would not have
+ * shown.
+ */
+async function loadHookLayers(
+  cwd: string,
+  trustProjectSettings: boolean,
+): Promise<{
+  entries: ValidatedHookEntry[];
+  sources: { source: HookSource; count: number }[];
+  unreadable: string[];
+  skipped: string[];
+}> {
+  const { loadAllHooks, defaultHookPaths } = await import("../hooks/index.js");
+  const paths = defaultHookPaths(cwd);
+  const loaded = loadAllHooks({ ...paths, trustProjectClaudeSettings: trustProjectSettings });
+  return {
+    entries: loaded.entries,
+    sources: loaded.sources,
+    // A layer that is out entirely: nothing in it ran, and the operator has to
+    // fix the file before any of it comes back.
+    unreadable: [
+      ...unreadableHookLayer(paths.settingsPath, "~/.jaa/config.json"),
+      ...(trustProjectSettings ? unreadableHookLayer(paths.claudeSettingsPath, ".claude/settings.json") : []),
+    ],
+    // A group or handler the validator skipped and named. Its siblings loaded,
+    // so this is a mistake in one hook, not an absent config.
+    skipped: loaded.warnings,
+  };
 }
 
 /**
@@ -122,35 +191,25 @@ async function hookConfigErrors(path: string, label: string): Promise<string[]> 
  * it rather than re-reading config itself — that is what keeps a run and
  * `jaa hooks list` from disagreeing about what is in force.
  *
- * `trustProjectClaudeSettings` follows the flag and nothing else. A project
- * `.claude/settings.json` lives inside a cloned repository, so the loader only
- * applies it for a caller that has been told the project is trusted. Every
- * command that runs hooks — `jaa hooks list|test`, `jaa ask`, `jaa chat` —
- * exposes the same `--trust-project-settings` opt-in and all of them default to
- * not applying it. There is no prompt and no second mechanism, so a run can
- * never honour a project layer that `jaa hooks list` would not have shown.
- *
- * A layer that fails to parse contributes no entries, and would otherwise take
- * a deny rule with it in silence. That is reported on stderr, in the same shape
- * `bootstrap` uses for a settings file it could not fully load, because a run
- * that quietly dropped a layer is exactly the case the operator cannot see.
+ * A layer that is out, or a group inside one that was skipped, contributes no
+ * entries — and would otherwise take a deny rule with it in silence. That is
+ * reported on stderr, because a run that quietly dropped a hook is exactly the
+ * case the operator cannot see.
  */
 async function hooksForRun(cwd: string, trustProjectSettings = false): Promise<ValidatedHookEntry[]> {
-  const { loadAllHooks, defaultHookPaths } = await import("../hooks/index.js");
-  const paths = defaultHookPaths(cwd);
-  const loaded = loadAllHooks({ ...paths, trustProjectClaudeSettings: trustProjectSettings });
-
-  const problems = [
-    ...loaded.warnings.map((warning) => `${paths.settingsPath}: ${warning}`),
-    ...(await hookConfigErrors(paths.settingsPath, "~/.jaa/config.json")),
-  ];
+  const { entries, unreadable, skipped } = await loadHookLayers(cwd, trustProjectSettings);
+  // `skipped` already names its own layer — `~/.jaa/config.json:` for a bad
+  // group, `AGENTS.md:` for the frontmatter key the parser cannot carry — so
+  // prefixing it with the settings path printed an absolute path in front of the
+  // layer's own label and read as two different files.
+  const problems = [...skipped, ...unreadable];
   if (problems.length > 0) {
     process.stderr.write(
-      `jaa: warning: a hook layer was dropped, so the hooks in it did not run this turn:\n` +
-        problems.map((line) => `  ${line}\n`).join(""),
+      `jaa: warning: some configured hooks did not run this turn:\n` +
+        problems.map((problem) => indentBlock(problem)).join(""),
     );
   }
-  return loaded.entries;
+  return entries;
 }
 
 function bootstrap(): void {
@@ -792,6 +851,7 @@ agent
   .option("--no-sandbox", "run shell commands without OS-level isolation (required on hosts with no sandbox)")
   .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
   .option("--permission-mode <mode>", "permission mode: suggest, auto-edit, or full-auto")
+  .option("--trust-project-settings", "apply .claude/settings.json from the working directory")
   .action(async (name: string, task: string | undefined, opts: {
     provider?: string;
     model?: string;
@@ -805,6 +865,7 @@ agent
     sandbox?: boolean;
     network?: boolean;
     permissionMode?: string;
+    trustProjectSettings?: boolean;
   }) => {
     const { projectContext, subagents } = loadAgents();
     const settings = loadSettings();
@@ -829,6 +890,24 @@ agent
       throw new Error(`unknown permission mode "${agentMode}" (suggest, auto-edit, full-auto)`);
     }
     const agentPolicy = resolveForAgent({ ...(agentMode !== undefined ? { mode: agentMode } : {}) });
+
+    // Phase 13: the same loader, layers and opt-in trust gate `ask` and `chat`
+    // use, through the same `hooksForRun` — so the entries are identical and the
+    // operator gets the same stderr report when a configured hook did not run.
+    // Without this a `PreToolUse` deny the operator wrote stops at the parent's
+    // own tool calls and the subagent walks straight past it — and a subagent is
+    // the cheaper thing to run, so it is the one most likely to be reached for.
+    // Empty when no layer declares a hook, which keeps this path inert for a host
+    // with no hooks.
+    const hookEntries = await hooksForRun(process.cwd(), opts.trustProjectSettings === true);
+
+    // Phase 14: snapshots of the subagent's writes need a store to land in, and
+    // the store is named by a session id — nothing but `session.id` is read from
+    // it. This run owns one for exactly as long as the subagent does. It is never
+    // saved, so `jaa session list` shows nothing new, and its store is pruned
+    // below.
+    const agentSession = createSession();
+
     const result = await runSubagent(
       { projectContext, subagents },
       spec,
@@ -856,6 +935,17 @@ agent
               root: process.cwd(),
             },
           ),
+        // Only carried when there is something to carry: `runSubagent` omits the
+        // loop option entirely for an empty list, so no `SessionStart`/`Stop`
+        // round trip happens on a host with no hooks.
+        ...(hookEntries.length > 0
+          ? {
+              hookEntries,
+              hookSessionId: agentSession.id,
+              permissionMode: agentPolicy.mode,
+            }
+          : {}),
+        checkpointSession: agentSession,
         ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
         ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
@@ -863,7 +953,15 @@ agent
       },
     );
 
+    // Phase 14 retention, at the one place a subagent run ends. The snapshots it
+    // took live in that session's store for as long as it is on disk, so the run
+    // returning is the moment the window can be applied — the same rule `ask` and
+    // `chat` apply. A no-op when the subagent never wrote a file.
+    const { cleanupSessionCheckpoints } = await import("../checkpoint/create.js");
+    cleanupSessionCheckpoints(agentSession);
+
     for (const msg of result.messages) {
+
       if (msg.role === "assistant" && msg.content) console.log(msg.content);
     }
 
@@ -1286,22 +1384,29 @@ hooks
   .description("print every hook that would fire, grouped by event")
   .option("--trust-project-settings", "apply .claude/settings.json from the working directory")
   .action(async (opts: { trustProjectSettings?: boolean }) => {
-    const { loadAllHooks, defaultHookPaths, HOOK_EVENTS } = await import("../hooks/index.js");
+    const { defaultHookPaths, HOOK_EVENTS } = await import("../hooks/index.js");
     const { sanitizeForDisplay } = await import("../permissions/index.js");
-    const paths = defaultHookPaths(process.cwd());
     const trust = opts.trustProjectSettings === true;
-    const loaded = loadAllHooks({ ...paths, ...(trust ? { trustProjectClaudeSettings: true } : {}) });
+    const paths = defaultHookPaths(process.cwd());
+    const { entries, sources, unreadable, skipped } = await loadHookLayers(process.cwd(), trust);
 
-    // A layer that fails to parse contributes no entries and so is invisible in
-    // the listing below. Report what the loader dropped, or a typo in one hook
-    // reads as "jaa ignored my config".
-    const errors = [
-      ...(await hookConfigErrors(paths.settingsPath, "~/.jaa/config.json")),
-      ...(trust ? await hookConfigErrors(paths.claudeSettingsPath, ".claude/settings.json") : []),
-    ];
-    if (errors.length > 0) {
-      console.log("config errors (these layers were NOT loaded):");
-      for (const line of errors) console.log(`  ${line}`);
+    // A layer that is out entirely contributes no entries and so is invisible in
+    // the listing below. Report it, or a typo in one hook reads as "jaa ignored
+    // my config".
+    if (unreadable.length > 0) {
+      console.log("config errors (these layers could not be read, so no hook in them was loaded):");
+      process.stdout.write(unreadable.map((line) => indentBlock(line)).join(""));
+      console.log("");
+    }
+
+    // A malformed *group* is a different case and used to be described as this
+    // one: the loader skips the group, names it, and loads every sibling beside
+    // it, so the layer is live and partially in force. Calling that "NOT loaded"
+    // sent an operator to look for a missing file when the fault was one typo in
+    // a hook they had written correctly.
+    if (skipped.length > 0) {
+      console.log("skipped (these hook groups were NOT loaded; every other hook in the same file is in force):");
+      process.stdout.write(skipped.map((line) => indentBlock(line)).join(""));
       console.log("");
     }
 
@@ -1315,20 +1420,23 @@ hooks
       console.log("");
     }
 
-    if (loaded.entries.length === 0) {
-      console.log("no hooks configured — add a `hooks` key to ~/.jaa/config.json");
+    if (entries.length === 0) {
+      console.log(
+        skipped.length > 0
+          ? "no hooks configured — every hook in the layers above was skipped, so none are in force"
+          : "no hooks configured — add a `hooks` key to ~/.jaa/config.json",
+      );
       return;
     }
 
-    const totalGroups = loaded.entries.reduce((total, entry) => total + entry.groups.length, 0);
+    const totalGroups = entries.reduce((total, entry) => total + entry.groups.length, 0);
     console.log(
-      `sources: ${loaded.sources.map((s) => `${s.source} ${s.count}`).join(", ")} — ${totalGroups} group(s) across ${loaded.entries.length} event(s)`,
+      `sources: ${sources.map((s) => `${s.source} ${s.count}`).join(", ")} — ${totalGroups} group(s) across ${entries.length} event(s)`,
     );
-    for (const warning of loaded.warnings) console.log(`  warning: ${warning}`);
     console.log("");
 
     for (const event of HOOK_EVENTS) {
-      const groups = loaded.entries.filter((entry) => entry.event === event).flatMap((entry) => entry.groups);
+      const groups = entries.filter((entry) => entry.event === event).flatMap((entry) => entry.groups);
       if (groups.length === 0) continue;
       console.log(`${event} (${groups.length} group${groups.length === 1 ? "" : "s"})`);
       for (const [index, group] of groups.entries()) {
@@ -1348,7 +1456,7 @@ hooks
   .option("--tool <name>", "tool name in the synthetic payload (default: Bash)")
   .option("--trust-project-settings", "apply .claude/settings.json from the working directory")
   .action(async (event: string, opts: { tool?: string; trustProjectSettings?: boolean }) => {
-    const { isHookEvent, HOOK_EVENTS, loadAllHooks, defaultHookPaths, buildPayload, decideFromHooks, matcherField } =
+    const { isHookEvent, HOOK_EVENTS, buildPayload, decideFromHooks, matcherField } =
       await import("../hooks/index.js");
     const { sanitizeForDisplay } = await import("../permissions/index.js");
 
@@ -1356,10 +1464,9 @@ hooks
       throw new Error(`unknown hook event "${event}" (valid: ${HOOK_EVENTS.join(", ")})`);
     }
 
-    const paths = defaultHookPaths(process.cwd());
     const trust = opts.trustProjectSettings === true;
-    const loaded = loadAllHooks({ ...paths, ...(trust ? { trustProjectClaudeSettings: true } : {}) });
-    const groups = loaded.entries.filter((entry) => entry.event === event).flatMap((entry) => entry.groups);
+    const { entries, unreadable, skipped } = await loadHookLayers(process.cwd(), trust);
+    const groups = entries.filter((entry) => entry.event === event).flatMap((entry) => entry.groups);
 
     // The payload is built from the event's own routing field rather than a
     // hand-rolled per-event table, so a matcher written against the real
@@ -1392,8 +1499,29 @@ hooks
     if (payload.agentType !== undefined) console.log(`agent:    ${payload.agentType}`);
     if (payload.prompt !== undefined) console.log(`prompt:   ${sanitizeForDisplay(payload.prompt, 120)}`);
 
+    // The trace below is built from the entries that loaded, so a group the
+    // validator skipped never appears in it. Printing "resolved decision: allow"
+    // without saying so is the most misleading thing this command can do: a
+    // `PreToolUse` deny rule the operator wrote would be sitting in the config,
+    // absent from the chain, and unremarked — and a `test` run is exactly where
+    // someone goes to find out whether the rule is live.
+    if (unreadable.length > 0) {
+      console.log("errors:    these layers could not be read, so no hook in them was loaded:");
+      process.stdout.write(unreadable.map((line) => indentBlock(line)).join(""));
+      console.log("");
+    }
+    if (skipped.length > 0) {
+      console.log("skipped:   some configured hooks did NOT load, so they did not run:");
+      process.stdout.write(skipped.map((line) => indentBlock(line)).join(""));
+      console.log("");
+    }
+
     if (groups.length === 0) {
-      console.log("groups:   0 registered — no hook in any layer fires on this event");
+      console.log(
+        skipped.length > 0
+          ? "groups:   0 registered — every hook for this event was skipped, so none of them fire"
+          : "groups:   0 registered — no hook in any layer fires on this event",
+      );
     } else {
       // The real chain, not a re-implementation: matchers, the `if` filter,
       // handler dispatch, timeouts, precedence and the fail-closed rule all
