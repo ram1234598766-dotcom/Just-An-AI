@@ -110,7 +110,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 12 | OS-level sandbox (Seatbelt / bubblewrap) | `de3ce22` | **done on macOS + Linux, none on Windows** (4 open gaps) |
 | 13 | Hooks (lifecycle events + blocking decisions) | `e9a81ab` | **done** |
 | 14 | Checkpoint, rewind and fork | `e9a81ab` | **done** (3 known limits) |
-| 15 | Multi-agent orchestration (parallel + worktrees + background) | - | **done** (3 known limits) |
+| 15 | Multi-agent orchestration (parallel + worktrees + background) | `62adbe8` | **done** (3 known limits) |
 | 16 | Compaction and persistent memory | - | planned |
 | 17 | Live code intelligence (LSP in the loop) | - | planned |
 | 18 | Compatibility and interop layer | - | planned |
