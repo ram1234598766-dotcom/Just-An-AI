@@ -1,17 +1,46 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { formatReport, runDoctor } from "../src/doctor.js";
 import { getPkgInfo } from "../src/version.js";
 
+const repoFile = (relative: string): string => fileURLToPath(new URL(`../${relative}`, import.meta.url));
+
 describe("version", () => {
   it("reads the package identity from package.json", () => {
-    const pkgJson = JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ) as { name: string; version: string };
+    const pkgJson = JSON.parse(readFileSync(repoFile("package.json"), "utf8")) as { name: string; version: string };
     const pkg = getPkgInfo();
     expect(pkg.name).toBe(pkgJson.name);
     expect(pkg.version).toBe(pkgJson.version);
     expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe("published tarball", () => {
+  /**
+   * Every repo-relative link in the README has to resolve inside the package.
+   *
+   * npm renders the README from the tarball, so a link to a file that `files`
+   * does not include is a dead link on the package page — and the page is where
+   * someone decides whether to install this. Nothing else catches it: the link
+   * is correct in the repository, and the test suite never looks at the tarball.
+   */
+  it("ships every document the README links to", () => {
+    const pkgJson = JSON.parse(readFileSync(repoFile("package.json"), "utf8")) as { files: string[] };
+    const readme = readFileSync(repoFile("README.md"), "utf8");
+    const links = [...readme.matchAll(/\]\((?!https?:|#)([^)\s]+)\)/g)].map((match) => match[1] ?? "");
+
+    expect(links.length, "no relative links found — the matcher is wrong, not the README").toBeGreaterThan(0);
+    const missing = links.filter((link) => !pkgJson.files.some((entry) => link === entry || link.startsWith(`${entry}/`)));
+    expect(missing, `not in package.json "files": ${missing.join(", ")}`).toEqual([]);
+  });
+
+  it("actually contains what it claims", () => {
+    // The list is not a promise on its own; the files have to exist.
+    const pkgJson = JSON.parse(readFileSync(repoFile("package.json"), "utf8")) as { files: string[] };
+    for (const entry of pkgJson.files) {
+      expect(existsSync(repoFile(entry)), `declared in "files" but absent: ${entry}`).toBe(true);
+    }
   });
 });
 
