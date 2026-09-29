@@ -37,7 +37,7 @@
  * position here is exactly its position in the saved session.
  */
 
-import { DEFAULT_TOKEN_BUDGET, trimToBudget } from "./budget.js";
+import { DEFAULT_TOKEN_BUDGET, estimateMessageTokens, estimateTokens, trimToBudget } from "./budget.js";
 import { compactIfNeeded } from "./compact.js";
 import { createCheckpointFromTool } from "../checkpoint/create.js";
 import { decideFromHooks } from "../hooks/decide.js";
@@ -55,6 +55,8 @@ import type { Session } from "./session.js";
 import type {
   ChatMessage,
   ChatRequest,
+  ChatResponse,
+  ProviderAdapter,
   ResolvedModel,
   ToolCall,
   ToolDef,
@@ -161,6 +163,47 @@ export interface AgentLoopOptions {
   numContext?: number;
   /** Fired when the model produces an assistant message (before tool execution). */
   onAssistantMessage?: (msg: ChatMessage) => void;
+  /**
+   * Take the compiler reports collected by the host's tool wrapper, if any.
+   *
+   * Called after each tool result, and purely for presentation: the same text is
+   * already appended to that result, so the model sees it and the saved session
+   * records it whether or not this is supplied. A host that wants the verdict as
+   * its own transcript row — visually distinct from both the model's claim and
+   * the tool output — supplies a drain here.
+   *
+   * A drain rather than a push, because the host's `withDiagnostics` wrapper is
+   * built before the loop and may produce a report the first time it is called;
+   * a callback would miss exactly the ones that arrive before a listener exists.
+   */
+  drainDiagnostics?: () => { text: string; path: string }[];
+  /**
+   * Fired for each fragment of assistant text as it arrives.
+   *
+   * The stream is only used when the adapter implements one **and** the caller
+   * asks for it. Nothing here is inferred from the completed message: a caller
+   * that gets no `onStreamDelta` is getting a non-streaming answer, and the
+   * fragments are exactly the message's `content` in order. This exists so a TUI
+   * can paint text while it is being written rather than after, and it is
+   * deliberately additive — `onAssistantMessage` still fires once with the
+   * finished message, so a caller that only wants the result is unaffected.
+   *
+   * Absent from the request when unset, so a caller that does not want tokens
+   * does not pay to receive them.
+   */
+  onStreamDelta?: (delta: string) => void;
+  /**
+   * Undo everything `onStreamDelta` has painted and start again with `text`.
+   *
+   * A stream is append-only, so a turn that has to be re-run cannot be corrected
+   * by appending — the caller is left holding a half-written answer. This is the
+   * only way to retract, and it fires exactly once per turn at most.
+   *
+   * A separate callback rather than a magic string inside `onStreamDelta`, so a
+   * host cannot miss it by not knowing a sentinel exists, and so the ordinary
+   * append path stays trivially correct.
+   */
+  onStreamReplace?: (text: string) => void;
   /** Fired before a tool call is executed. */
   onToolCall?: (call: ToolCall) => void;
   /** Fired after a tool call resolves (ok=false means the executor threw). */
@@ -289,7 +332,10 @@ async function drive(
     if (options.temperature !== undefined) request.temperature = options.temperature;
     if (options.numContext !== undefined) request.numContext = options.numContext;
 
-    const response = await options.model.adapter.chat(request);
+    const response =
+      options.onStreamDelta !== undefined && options.model.adapter.stream !== undefined
+        ? await chatStreaming(request, options.model.adapter, options.onStreamDelta, options.onStreamReplace)
+        : await options.model.adapter.chat(request);
     inputTokens += response.usage.inputTokens;
     outputTokens += response.usage.outputTokens;
 
@@ -366,6 +412,86 @@ function complete(
 
 /** A recorder with the session and the confined root already bound to it. */
 type BoundRecorder = (toolName: string, toolCallId: string, turn: number, args: unknown) => Promise<void>;
+
+/**
+ * One turn's model call, painted as it arrives.
+ *
+ * Three things it must not do, each of which is a real failure mode rather than
+ * a theoretical one:
+ *
+ *  1. **Lose a tool call.** `ProviderAdapter.stream` is optional and, on the
+ *     adapters that have it, yields *text only* — tool calls arrive in the
+ *     chunks of some providers and not others. A streamed turn that produced no
+ *     text and no usage has therefore told us nothing, and answering "the model
+ *     finished, here is an empty message" would end a turn the model wanted to
+ *     continue. So an empty stream falls back to the non-streaming path, which
+ *     is the only one guaranteed to carry `toolCalls`.
+ *  2. **Double-count usage.** Providers send usage on a final chunk, often
+ *     repeatedly. Taking the last non-empty report, rather than summing, is what
+ *     matches the non-streaming `usage` field.
+ *  3. **Change the answer.** The message it returns is built from the same
+ *     fragments the caller was shown, in order, so the painted text and the
+ *     stored text cannot disagree.
+ */
+async function chatStreaming(
+  request: ChatRequest,
+  adapter: ProviderAdapter,
+  onDelta: (delta: string) => void,
+  onReplace: ((text: string) => void) | undefined,
+): Promise<ChatResponse> {
+  const stream = adapter.stream;
+  if (stream === undefined) return adapter.chat(request);
+
+  let text = "";
+  let usage: Usage | undefined;
+  let failed: unknown;
+  try {
+    for await (const chunk of stream.call(adapter, request)) {
+      if (chunk.delta !== "") {
+        text += chunk.delta;
+        onDelta(chunk.delta);
+      }
+      if (chunk.usage !== undefined) usage = chunk.usage;
+    }
+  } catch (err) {
+    // A stream that dies mid-turn has produced a partial message. Re-running the
+    // turn without streaming is the only way to get a complete one, and a
+    // partial answer presented as a finished one is the failure to avoid.
+    failed = err ?? new Error("the stream failed");
+  }
+
+  if (failed !== undefined) {
+    const retry = await adapter.chat(request);
+    if (retry.message.content === "") throw failed;
+    // The caller was already painted the partial text, so the retry is announced
+    // as a replacement. Appending would leave the transcript reading "the
+    // complthe complete answer" — neither the partial nor the whole.
+    onReplace?.(retry.message.content);
+    return retry;
+  }
+
+  if (text === "" && usage === undefined) {
+    // Nothing came back at all: the server had nothing to say, or said it in a
+    // shape this does not understand. Let the real call decide.
+    return adapter.chat(request);
+  }
+
+  return {
+    message: { role: "assistant", content: text },
+    // A stream that never reported usage is not a zero-token turn. This is
+    // estimated from the characters actually seen so the context gauge moves,
+    // and `onAssistantMessage` still carries the authoritative number when the
+    // provider gave one.
+    usage: usage ?? { inputTokens: estimatePrompt(request.messages), outputTokens: estimateTokens(text) },
+    model: request.model,
+    provider: adapter.id,
+  };
+}
+
+/** The prompt as it would be sent, for the gauge when a stream reports no usage. */
+function estimatePrompt(messages: readonly ChatMessage[]): number {
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+}
 
 function createCheckpointRecorder(options: AgentLoopCheckpointOptions): BoundRecorder {
   const record =
