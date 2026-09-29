@@ -300,6 +300,29 @@ framing, proper `initialize`/`initialized` handshake, `-32002` before init,
 repeatable; `--no-tools` and `--allow-bash` are available. LSP uses separate
 `Content-Length` framing with extra-header support.
 
+### Language servers
+
+jaa can check your work with a real language server after every edit, and will
+tell you the truth about whether that is happening. It installs none of them:
+each is your choice, detected per project, and reported as unusable when the
+toolchain behind it is missing.
+
+```
+jaa lsp list
+```
+
+`lsp list` distinguishes *installed* from *usable*, because the difference is not
+academic. `rust-analyzer` with no `cargo` installed starts, handshakes, and
+reports nothing at all — no error, no diagnostics, no way to tell that from a
+file with no problems in it. jaa reports that as unavailable rather than
+available.
+
+Six servers are wired: TypeScript, Python, Rust, Go, C++ and Java. All six are
+covered by tests that run each one against a real project with a broken file and
+a clean control file — see **[docs/language-servers.md](docs/language-servers.md)**
+for what each needs, and for the setup each one requires (a 5.x `tsserver` beside
+TypeScript 7, a `compile_commands.json` for clangd, source roots for JDT LS).
+
 ## Sessions
 
 One JSON file per session under `~/.jaa/sessions/`. Zod-validated on every read
