@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { getPkgInfo } from "../version.js";
+import { shouldLaunchTui } from "./tui-default.js";
+
+/**
+ * The executor shape the TUI and the loop agree on.
+ *
+ * Named because two different call sites declare it — the permission gate wraps
+ * one, the diagnostics wrapper wraps the other — and an inline structural type in
+ * both places is how the two silently drift apart.
+ */
+type ChatAppExecuteTool = (call: ToolCall) => Promise<string>;
 import { formatReport, runDoctor } from "../doctor.js";
 import { ensureJaaHome } from "../config/paths.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -878,6 +888,10 @@ program
   )
   .option("--no-sandbox", "run shell commands without OS-level isolation")
   .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
+  .option(
+    "--lsp",
+    "check edits with a real language server, and show the compiler's verdict as its own line",
+  )
   .action(async (opts: {
     provider?: string;
     model?: string;
@@ -896,6 +910,7 @@ program
     sandbox?: boolean;
     allowNetwork?: boolean;
     trustProjectSettings?: boolean;
+    lsp?: boolean;
   }) => {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error("`jaa chat` needs an interactive terminal — use `jaa ask <prompt>` for one-shot output");
@@ -932,7 +947,7 @@ program
     }
     const chatPolicy = resolveForChat({ ...(chatMode !== undefined ? { mode: chatMode } : {}) });
     const chatGrants = new GrantsForChat();
-    const executeTool = createPermissionGate(
+     const gatedExecuteTool: ChatAppExecuteTool = createPermissionGate(
       (call) => rawExecuteTool({ id: call.id ?? "call", name: call.name, arguments: call.arguments }),
       chatPolicy.engine,
       chatPolicy.mode,
@@ -959,13 +974,48 @@ program
     // operator actually uses is the one the hook chain does not reach. Without
     // `--trust-project-settings` a project `.claude/settings.json` is exactly as
     // untrusted here as it is in `ask`.
-    const chatHookEntries = await hooksForRun(process.cwd(), opts.trustProjectSettings === true);
+     const chatHookEntries = await hooksForRun(process.cwd(), opts.trustProjectSettings === true);
+
+     // Phase 17: one diagnostics source for both consumers.
+     //
+     // `withDiagnostics` appends the compiler's verdict to the tool result, so
+     // the model sees it and the saved session records it. The same call also
+     // hands the report to a listener, which is what the TUI draws. One source
+     // means the two cannot disagree about what the compiler said.
+     //
+     // A small listener set rather than a callback held in a variable, because
+     // the wrapper is built before the TUI exists and the TUI subscribes after
+     // it is constructed.
+     /**
+      * Reports the compiler produced that the TUI has not drawn yet.
+      *
+      * A queue rather than a callback, because the wrapper is built before the
+      * TUI exists: `withDiagnostics` runs during a tool call, and the TUI
+      * subscribes when it mounts. A report produced in between has to be
+      * somewhere, or it is lost — and a lost diagnostic is the one failure this
+      * whole feature exists to prevent.
+      */
+     const diagnosticsQueue: { text: string; path: string }[] = [];
+     const drainDiagnostics = (): { text: string; path: string }[] => diagnosticsQueue.splice(0);
+     let chatExecuteTool: ChatAppExecuteTool = gatedExecuteTool;
+     if (opts.lsp === true) {
+       const { LspManager } = await import("../lsp/manager.js");
+       const { detectServers } = await import("../lsp/registry.js");
+       const { withDiagnostics } = await import("../lsp/loop.js");
+       const detected = detectServers(toolContext.root);
+       const manager = new LspManager({ root: toolContext.root, servers: detected.map((d) => d.config) });
+       chatExecuteTool = withDiagnostics(gatedExecuteTool, { manager, root: toolContext.root }, (report) => {
+         // `text` is the same text `withDiagnostics` appended to the tool result,
+         // so the row and the model's copy cannot disagree.
+         diagnosticsQueue.push({ text: report.text, path: report.path });
+       });
+     }
 
      await startChat({
        model,
        systemPrompt: opts.system ?? DEFAULT_SYSTEM_PROMPT,
        ...(toolsEnabled ? { tools: registry.list() } : {}),
-       executeTool,
+       executeTool: chatExecuteTool,
        ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
        ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
@@ -1006,8 +1056,15 @@ program
         if (delta.length === 0) return;
         appendMessages(session, ...delta);
         saveSession(session);
-      },
-    });
+       },
+       // Phase 17, for the user's eyes rather than the model's. The diagnostics
+       // already reach the model and the saved session on the tool result; this
+       // drains what the wrapper collected into rows of their own, so the
+       // compiler's verdict cannot be mistaken for the model reporting on its
+       // own work. Absent unless `--lsp`, so a chat with no language server
+       // behaves exactly as it did.
+       ...(opts.lsp === true ? { drainDiagnostics } : {}),
+     });
 
     if (session && session.messages.length > resumeMessages.length) {
       console.error(`conversation saved to session ${session.id}`);
@@ -2351,11 +2408,38 @@ tasks
     console.log(`removed ${removed} task record(s)`);
   });
 
-program.parseAsync(process.argv).catch((err: unknown) => {
+/**
+ * Everything bare `jaa` needs, and nothing more.
+ *
+ * The default is a plain session: no resume (there is no argument to name one),
+ * no explicit provider, and tools and skills on, because that is what `jaa chat`
+ * does with its own defaults. Reusing the same action rather than a second
+ * implementation is the point — a chat that behaves differently depending on how
+ * it was started would be two products, and the one you get by accident is the
+ * one that gets trusted.
+ */
+async function launchDefaultChat(): Promise<void> {
+  await program.parseAsync(["node", "jaa", "chat"]);
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  // Read the raw argv, not `program.args`. `program.args` holds the declared
+  // *arguments* of the program, which is empty for a command with subcommands —
+  // so it is empty for `jaa hooks list` just as it is for bare `jaa`, and
+  // consulting it before parsing would send every subcommand to the help text.
+  if (argv.length === 0) {
+    if (shouldLaunchTui()) {
+      await launchDefaultChat();
+      return;
+    }
+    program.help();
+    return;
+  }
+  await program.parseAsync(process.argv);
+}
+
+main().catch((err: unknown) => {
   console.error(`jaa: ${err instanceof Error ? err.message : String(err)}`);
   process.exitCode = 1;
 });
-
-if (program.args.length === 0 && !process.argv.slice(2).some((a) => a === "--help" || a === "-h")) {
-  program.help();
-}
