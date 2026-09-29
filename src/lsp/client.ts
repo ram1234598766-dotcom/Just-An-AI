@@ -25,6 +25,14 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const METHOD_NOT_FOUND = -32601;
 
 /**
+ * How long after spawning a server is it still fair to call it "starting".
+ *
+ * Long enough for Eclipse JDT LS to finish indexing a project, which is the
+ * slowest server in the registry by a wide margin.
+ */
+const STARTUP_GRACE_MS = 120_000;
+
+/**
  * How long to wait for a push-mode server to publish diagnostics.
  *
  * Bounded, because the common case for a file with no problems is a server that
@@ -112,6 +120,10 @@ export class LspClient {
   private readonly timeoutMs: number;
   private readonly cwd: string;
   private initializationOptions: Record<string, unknown> = {};
+  /** When this process was spawned, for the startup-grace judgement. */
+  private startedAt = Date.now();
+  /** Set once the server has finished starting and answered a real request. */
+  private readySince: number | undefined;
   /** Version numbers for `didChange`, per the protocol's monotonic rule. */
   private versions = new Map<string, number>();
   /** Documents the server has been told about. */
@@ -247,11 +259,12 @@ export class LspClient {
    * caller reports as "no diagnostics available" rather than as "no errors".
    */
   async diagnosticsFor(uri: string, timeoutMs?: number): Promise<LspTextDocumentDiagnosticResult | null> {
+    let pullFailed: string | undefined;
     if (this.supports("diagnostic")) {
       try {
         const pulled = await this.getDiagnostics(uri);
         if (pulled !== null) return pulled;
-      } catch {
+      } catch (err) {
         // A server that advertises pull and then refuses it is a push server
         // with a stale or partial capability, and that must not cost the caller
         // its diagnostics.
@@ -263,12 +276,23 @@ export class LspClient {
         // server the push channel had the real diagnostics waiting. Re-throwing
         // there turned a working server into a failed check, and the caller
         // reported a language problem that did not exist.
-        //
-        // Falling back is safe because every server supported here is required
-        // to publish diagnostics; pull is an optimisation, never the only path.
+        pullFailed = err instanceof Error ? err.message : String(err);
       }
     }
-    return this.waitForDiagnostics(uri, timeoutMs === undefined ? {} : { timeoutMs });
+
+    const pushed = await this.waitForDiagnostics(uri, timeoutMs === undefined ? {} : { timeoutMs });
+    if (pushed !== null) return pushed;
+
+    // Both channels were tried and neither answered. This is deliberately an
+    // error rather than an empty result: "the server said nothing" and "there
+    // are no problems" are different claims, and only one of them is true here.
+    if (pullFailed !== undefined) {
+      throw new Error(
+        `the server's pull diagnostics request failed (${pullFailed}) and it published nothing either, ` +
+          `so this file's state is unknown rather than clean`,
+      );
+    }
+    return null;
   }
 
   // --- document sync -------------------------------------------------------
@@ -381,6 +405,67 @@ export class LspClient {
     }
   }
 
+  /**
+   * Whether the server is still within its startup window.
+   *
+   * JDT LS answers `initialize` and then spends a long time indexing, sending
+   * `language/status` as it goes. A caller with a short deadline is better
+   * served by being told the server is still starting than by an error that
+   * reads like a broken installation. This is a status, not a failure.
+   */
+  get isStarting(): boolean {
+    if (this.readySince !== undefined) return false;
+    return Date.now() - this.startedAt < STARTUP_GRACE_MS;
+  }
+
+  /**
+   * Whether the server can push diagnostics at all.
+   *
+   * `textDocument.publishDiagnostics` is a **client** capability in the
+   * protocol, not a server one, so a server that pushes does not necessarily
+   * advertise anything here — rust-analyzer advertises only
+   * `diagnosticProvider` and still publishes. So this is not asked of the
+   * capabilities at all; the only honest test is whether the server has
+   * actually published something, and `diagnosticsFor` waits for that and
+   * reports the file as unknown if neither channel answered.
+   */
+
+  /**
+   * Answer the server-to-client requests jaa can answer meaningfully.
+   *
+   * Returns false for anything unhandled, so the caller can answer
+   * `MethodNotFound` as before.
+   *
+   * `workspace/configuration` is not optional politeness. Eclipse JDT LS asks
+   * for its whole settings object during initialisation and **blocks until it
+   * gets an answer** - not a `MethodNotFound`, an actual array of settings, one
+   * per requested section. Answering with an error made the server sit at "0%
+   * Starting Java Language Server" forever, so a Java project reported nothing
+   * and looked exactly like a clean file.
+   */
+  private answerServerRequest(id: number | string, method: string, params: unknown): boolean {
+    if (method === "workspace/configuration") {
+      const items = (params as { items?: unknown[] } | undefined)?.items;
+      // An empty object per section is the "no overrides" answer. The protocol
+      // requires the response array to match the request array position by
+      // position, so its length is the request's length and not a guess.
+      const sectionCount = Array.isArray(items) ? items.length : 0;
+      this.respond(id, Array.from({ length: sectionCount }, () => ({})));
+      return true;
+    }
+    if (method === "workspace/workspaceFolders") {
+      this.respond(id, []);
+      return true;
+    }
+    if (method === "window/workDoneProgress/create" || method === "client/registerCapability") {
+      // Both are notifications in practice; answering null is the spec's way of
+      // saying "accepted" and keeps the server from waiting.
+      this.respond(id, null);
+      return true;
+    }
+    return false;
+  }
+
   /** Server capabilities advertised during initialize. */
   get serverCapabilities(): LspServerCapabilities {
     return this.capabilities;
@@ -429,9 +514,11 @@ export class LspClient {
   }
 
   private async connectInternal(): Promise<void> {
-    // Phase 17: through `spawnPipe`, so a Windows npm shim is unwrapped and run
-    // under `process.execPath` instead of failing as an unspawnable `.cmd`.
-    const { child } = spawnPipe(this.command, this.args, {
+  this.startedAt = Date.now();
+  this.readySince = undefined;
+  // Phase 17: through `spawnPipe`, so a Windows npm shim is unwrapped and run
+  // under `process.execPath` instead of failing as an unspawnable `.cmd`.
+  const { child } = spawnPipe(this.command, this.args, {
       cwd: this.cwd,
       ...(this.spawnImpl !== undefined ? { spawnImpl: this.spawnImpl } : {}),
     });
@@ -566,6 +653,7 @@ export class LspClient {
     // their own initialisation on it. Answering `MethodNotFound` is the protocol's
     // way of saying "not implemented", and every server treats it as that.
     if (obj.id !== undefined && obj.method !== undefined) {
+      if (this.answerServerRequest(obj.id, obj.method, obj.params)) return;
       this.respondError(obj.id, METHOD_NOT_FOUND, `jaa does not implement "${obj.method}"`);
       return;
     }
@@ -582,6 +670,8 @@ export class LspClient {
     }
 
     if (obj.id !== undefined && obj.result !== undefined) {
+      // The server has answered something, so it is past its startup window.
+      this.readySince ??= Date.now();
       const pending = this.pending.get(obj.id);
       if (pending) {
         clearTimeout(pending.timer);
@@ -688,6 +778,16 @@ export class LspClient {
   }
 
   /** Answer a server-to-client request with a JSON-RPC error. */
+  private respond(id: string | number, result: unknown): void {
+    if (!this.proc?.stdin || this.closed || this.proc.stdin.destroyed) return;
+    const frame = encodeFrame({ jsonrpc: "2.0", id, result });
+    try {
+      this.proc.stdin.write(Buffer.from(frame, "utf8"));
+    } catch {
+      // The pipe closed between the check and the write.
+    }
+  }
+
   private respondError(id: string | number, code: number, message: string): void {
     if (!this.proc?.stdin || this.closed || this.proc.stdin.destroyed) return;
     const frame = encodeFrame({ jsonrpc: "2.0", id, error: { code, message } });

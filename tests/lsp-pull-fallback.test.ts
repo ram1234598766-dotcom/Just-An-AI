@@ -128,7 +128,11 @@ describe("lsp: pull diagnostics are an optimisation, never a dependency", () => 
     }
   });
 
-  it("resolves empty rather than throwing when both channels are silent", async () => {
+  it("reports the file as unknown when pull failed and nothing was published", async () => {
+    // Falling back is only safe if something comes back. A server that offers
+    // pull, fails it, and then stays silent has told us nothing, and "nothing
+    // told" is not "no problems" — returning an empty result here would report
+    // a broken file as clean, which is the one answer that must never be guessed.
     const client = fakeServer({
       capabilities: { diagnosticProvider: {}, textDocument: { publishDiagnostics: {} } },
       onRequest: (method) =>
@@ -138,9 +142,46 @@ describe("lsp: pull diagnostics are an optimisation, never a dependency", () => 
     try {
       await client.connect();
       client.openDocument("file:///tmp/b.rs", "rust", "fn main() {}");
-      // Null means "the server said nothing", which the caller reports as an
-      // empty set plus a reason — not as a crash.
-      await expect(client.diagnosticsFor("file:///tmp/b.rs", 200)).resolves.toBeNull();
+      await expect(client.diagnosticsFor("file:///tmp/b.rs", 200)).rejects.toThrow(
+        /pull diagnostics request failed \(internal error\).*nothing either.*unknown rather than clean/,
+      );
+    } finally {
+      await client.disconnect().catch(() => undefined);
+    }
+  });
+
+  it("returns null when a push-only server simply has nothing to say", async () => {
+    // No pull was attempted, so silence really does mean "no push arrived", and
+    // null is the honest answer: the caller reports it as "no diagnostics
+    // available" rather than as a clean file.
+    const client = fakeServer({
+      capabilities: { textDocument: { publishDiagnostics: {} } },
+      onRequest: () => undefined,
+    });
+
+    try {
+      await client.connect();
+      client.openDocument("file:///tmp/c.rs", "rust", "fn main() {}");
+      await expect(client.diagnosticsFor("file:///tmp/c.rs", 200)).resolves.toBeNull();
+    } finally {
+      await client.disconnect().catch(() => undefined);
+    }
+  });
+
+  it("still returns an empty result when the server genuinely reports no problems", async () => {
+    // The distinction that matters: a *successful* pull of zero diagnostics is a
+    // real answer and stays an empty set.
+    const client = fakeServer({
+      capabilities: { diagnosticProvider: {}, textDocument: { publishDiagnostics: {} } },
+      onRequest: (method) =>
+        method === "textDocument/diagnostic" ? { result: { kind: "full", items: [] } } : undefined,
+    });
+
+    try {
+      await client.connect();
+      client.openDocument("file:///tmp/d.rs", "rust", "fn main() {}");
+      const result = await client.diagnosticsFor("file:///tmp/d.rs", 200);
+      expect(result?.items, "an empty successful pull is a real answer").toEqual([]);
     } finally {
       await client.disconnect().catch(() => undefined);
     }
