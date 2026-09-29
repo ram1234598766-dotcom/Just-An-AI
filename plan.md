@@ -111,7 +111,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 13 | Hooks (lifecycle events + blocking decisions) | `e9a81ab` | **done** |
 | 14 | Checkpoint, rewind and fork | `e9a81ab` | **done** (3 known limits) |
 | 15 | Multi-agent orchestration (parallel + worktrees + background) | `62adbe8` | **done** (3 known limits) |
-| 16 | Compaction and persistent memory | - | **done** (2 known limits) |
+| 16 | Compaction and persistent memory | `5c825eb` | **done** (2 known limits) |
 | 17 | Live code intelligence (LSP in the loop) | - | planned |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
