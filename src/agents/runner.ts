@@ -1,5 +1,9 @@
 import type { AgentSpec, ParsedAgents } from "./types.js";
-import { runAgentLoop, DEFAULT_SYSTEM_PROMPT, type AgentLoopResult } from "../agent/loop.js";
+import { DEFAULT_SYSTEM_PROMPT, runAgentLoop, type AgentLoopResult } from "../agent/loop.js";
+import { effectiveToolNames } from "../orchestrator/pool.js";
+import { providerIds } from "../config/providers.js";
+import { skillContext } from "../skills/match.js";
+import { loadSkills } from "../skills/loader.js";
 import { createDefaultRegistry } from "../tools/index.js";
 import { resolveModel } from "../providers/router.js";
 import type { ChatMessage, ToolCall } from "../providers/types.js";
@@ -78,6 +82,21 @@ export interface SubagentOptions {
    * writes are limited to.
    */
   checkpointSession?: Session;
+  /**
+   * Phase 15: the tool names this session can actually reach, used to narrow the
+   * declaration. Pass it to make "a subagent cannot escalate" true of the
+   * registry too and not only of the permission gate — the gate is asked about a
+   * call the registry has not heard of, so a declared tool the parent never had
+   * would simply be absent. Omitted, the declaration is still applied as an
+   * intersection against the default registry's own tool list.
+   */
+  availableTools?: readonly string[];
+  /**
+   * Phase 15: skills preloaded into the system prompt, so an agent that needs one
+   * does not have to trigger it by keyword. Names that match nothing are dropped
+   * rather than injected as an empty section.
+   */
+  skills?: readonly string[];
 }
 
 export interface SubagentResult extends AgentLoopResult {
@@ -90,14 +109,75 @@ export interface SubagentResult extends AgentLoopResult {
  * and the agent's own instructions.  The subagent inherits the default jaa
  * identity but is scoped to its specialised instructions.
  */
-export function buildAgentSystemPrompt(projectContext: string, spec: AgentSpec): string {
+export function buildAgentSystemPrompt(projectContext: string, spec: AgentSpec, preloadedSkills = ""): string {
   const parts: string[] = [];
   if (projectContext) {
     parts.push(`## Project context\n\n${projectContext}`);
   }
   parts.push(`## Subagent: ${spec.name}\n\n${spec.instructions}`);
+  // Before the jaa identity, so the agent reads its job before the persona.
+  if (preloadedSkills) parts.push(preloadedSkills);
   parts.push(DEFAULT_SYSTEM_PROMPT);
   return parts.join("\n\n");
+}
+
+/** Split a comma- or space-separated AGENTS.md list field. */
+function parseList(value: string): string[] {
+  return value
+    .split(/[,\n]/)
+    .flatMap((part) => part.trim().split(/\s+/))
+    .filter((entry) => entry !== "");
+}
+
+/**
+ * A `Model:` field as a provider/model pair.
+ *
+ * `openai` is a provider, `gpt-4o` is a model, and `openai gpt-4o` is both in
+ * order. Anything else is treated as a model id, which is the common case: the
+ * provider registry is keyed by a known id and a misspelling should be passed
+ * through for the router to report, rather than silently swallowed here.
+ */
+function parseModelField(value: string | undefined): { provider?: string; model?: string } {
+  if (value === undefined) return {};
+  const parts = parseList(value);
+  if (parts.length === 0) return {};
+  const known = new Set(providerIds());
+  if (parts.length === 1) {
+    const only = parts[0]!;
+    return known.has(only.toLowerCase()) ? { provider: only } : { model: only };
+  }
+  const [first, second] = parts as [string, string];
+  return known.has(first.toLowerCase()) ? { provider: first, model: second } : { model: `${first} ${second}` };
+}
+
+/**
+ * The system-prompt text for the skills this agent declared.
+ *
+ * Matched by exact name or id rather than through `matchSkills`, which is
+ * substring matching designed to guess whether a *prompt* wants a skill. A
+ * `Skills:` line names the skills it wants, so an exact match is the right
+ * relation and a substring rule would silently pull in unrelated skills whose
+ * names happen to be substrings.
+ *
+ * Names that match nothing contribute nothing, so a stale line costs a lookup
+ * rather than an empty section the model has to reason about. A loader that
+ * throws — a missing or unreadable skills directory — yields no preload, which
+ * is exactly the pre-Phase-15 behaviour.
+ */
+function preloadSkills(spec: AgentSpec, extra: readonly string[] | undefined): string {
+  const names = [...(spec.skills !== undefined ? parseList(spec.skills) : []), ...(extra ?? [])];
+  if (names.length === 0) return "";
+  let skills: ReturnType<typeof loadSkills>;
+  try {
+    skills = loadSkills();
+  } catch {
+    return "";
+  }
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  const chosen = skills.filter(
+    (skill) => wanted.has(skill.name.toLowerCase()) || wanted.has(skill.id.toLowerCase()),
+  );
+  return skillContext(chosen);
 }
 
 /**
@@ -130,8 +210,16 @@ export async function runSubagent(
   spec: AgentSpec,
   opts: SubagentOptions,
 ): Promise<SubagentResult> {
-  const model = resolveModel(opts.model ?? {});
-  const systemPrompt = opts.prompt ?? buildAgentSystemPrompt(agents.projectContext, spec);
+  // A declaration's `Model` is `provider`, `model`, or `provider model`. The
+  // caller's own `--provider`/`--model` wins over it, so an operator can
+  // override a checked-in default without editing AGENTS.md.
+  const declaredModel = parseModelField(spec.model);
+  const requested = { ...declaredModel, ...(opts.model ?? {}) };
+  const modelInput: { provider?: string; model?: string } = {};
+  if (requested.provider !== undefined) modelInput.provider = requested.provider;
+  if (requested.model !== undefined) modelInput.model = requested.model;
+  const model = resolveModel(modelInput);
+  const systemPrompt = opts.prompt ?? buildAgentSystemPrompt(agents.projectContext, spec, preloadSkills(spec, opts.skills));
 
   const registry = createDefaultRegistry();
   const toolContext: ToolContext = {
@@ -144,6 +232,15 @@ export async function runSubagent(
     ...(opts.sandboxEnforcement !== undefined ? { sandboxEnforcement: opts.sandboxEnforcement } : {}),
     ...(opts.allowNetwork !== undefined ? { allowNetwork: opts.allowNetwork } : {}),
   };
+
+  // Phase 15: the tool list the model is actually offered is the parent's,
+  // narrowed by the declaration. Both operations only remove, so no AGENTS.md
+  // field and no caller option can add a tool the session did not have.
+  const declared = spec.tools ?? undefined;
+  const disallowed = spec.disallowedTools ?? undefined;
+  const parentTools = opts.availableTools ?? registry.list().map((tool) => tool.name);
+  const allowedNames = new Set(effectiveToolNames(parentTools, declared ? parseList(declared) : undefined, disallowed ? parseList(disallowed) : undefined));
+  const advertised = registry.list().filter((tool) => allowedNames.has(tool.name.toLowerCase()));
   const rawExecute = (call: ToolCall) => registry.execute(call.name, call.arguments, toolContext);
   // Callers can wrap this with the permission gate. Left ungated, a subagent
   // is a way to reach every tool the parent can, minus whatever the caller
@@ -161,8 +258,13 @@ export async function runSubagent(
     model,
     messages,
     executeTool,
-    ...(opts.tools !== false ? { tools: registry.list() } : {}),
-    ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+    // The narrowed list, never `registry.list()`: advertising a tool the model
+    // may not use wastes a turn on a call the gate will refuse, and advertising
+    // the full list is what made a declared narrowing advisory rather than real.
+    ...(opts.tools !== false && advertised.length > 0 ? { tools: advertised } : {}),
+    // The declaration's cap wins over the caller's only when the caller left it
+    // unset, so `--max-turns` can still raise it for one run.
+    ...(opts.maxTurns ?? spec.maxTurns) !== undefined ? { maxTurns: opts.maxTurns ?? spec.maxTurns } : {},
     ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
     ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
     ...(opts.numContext !== undefined ? { numContext: opts.numContext } : {}),

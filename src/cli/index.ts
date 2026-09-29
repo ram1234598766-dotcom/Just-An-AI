@@ -33,7 +33,7 @@ import {
 } from "../skills/index.js";
 import { loadAgents } from "../agents/index.js";
 import { McpClient, allMcpTools, executeMcpTool } from "../mcp/index.js";
-import type { ResolvedModel } from "../providers/types.js";
+import type { ChatMessage, ResolvedModel } from "../providers/types.js";
 import type { ToolExecutor } from "../agent/loop.js";
 import type { HookHandler, ValidatedHookEntry } from "../hooks/types.js";
 import type { HookSource } from "../hooks/load.js";
@@ -44,6 +44,23 @@ function parsePositiveInt(value: string): number {
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n) || n <= 0) throw new Error(`expected a positive integer, got "${value}"`);
   return n;
+}
+
+/**
+ * The last assistant message with content in a transcript.
+ *
+ * A worker's report is its final answer, not its whole transcript: the earlier
+ * assistant messages are the tool-call scaffolding, and concatenating them would
+ * put a pile of "now I will read the file" narration in front of the result. The
+ * `?? ""` matters because a run that ended on `max_turns` can finish with an
+ * assistant message that carries only tool calls and no text.
+ */
+function lastAssistantText(messages: ChatMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role === "assistant" && message.content.trim() !== "") return message.content;
+  }
+  return "";
 }
 
 /**
@@ -956,6 +973,14 @@ agent
   .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
   .option("--permission-mode <mode>", "permission mode: suggest, auto-edit, or full-auto")
   .option("--trust-project-settings", "apply .claude/settings.json from the working directory")
+  .option(
+    "--alongside <names>",
+    "also run these comma-separated subagents in parallel under the thread and depth caps",
+  )
+  .option("--max-threads <n>", "workers running at once (default 6, ceiling 32)", parsePositiveInt)
+  .option("--max-depth <n>", "delegation edges below this task (default 1, ceiling 4)", parsePositiveInt)
+  .option("--isolation <kind>", "run each worker in its own git worktree: none or worktree")
+  .option("--keep-worktrees", "do not remove the worktrees this run created")
   .action(async (name: string, task: string | undefined, opts: {
     provider?: string;
     model?: string;
@@ -970,6 +995,11 @@ agent
     network?: boolean;
     permissionMode?: string;
     trustProjectSettings?: boolean;
+    alongside?: string;
+    maxThreads?: number;
+    maxDepth?: number;
+    isolation?: string;
+    keepWorktrees?: boolean;
   }) => {
     const { projectContext, subagents } = loadAgents();
     const settings = loadSettings();
@@ -1012,50 +1042,124 @@ agent
     // below.
     const agentSession = createSession();
 
-    const result = await runSubagent(
-      { projectContext, subagents },
-      spec,
-      {
-        task: taskText,
-        ...(opts.system !== undefined ? { prompt: opts.system } : {}),
-        model: modelInput,
-        tools: opts.tools !== false,
-        // A subagent no longer inherits shell access just because tools are on.
-        // It must be opted into, and then it is still subject to the gate.
-        allowBash: opts.bash === true,
-        // Commander maps `--no-sandbox` to `sandbox: false`. Without this a
-        // subagent's bash could never run on a host with no OS sandbox, because
-        // `require` is unsatisfiable there and the operator had no way to say so.
-        sandboxEnforcement: opts.sandbox === false ? "best-effort" : "require",
-        allowNetwork: opts.network === true,
-        executeTool: (inner) =>
-          gateForAgent(
-            (call) => inner({ id: call.id ?? "call", name: call.name, arguments: call.arguments }),
-            agentPolicy.engine,
-            agentPolicy.mode,
-            {
-              interactive: false,
-              cwd: process.cwd(),
-              root: process.cwd(),
-            },
-          ),
-        // Only carried when there is something to carry: `runSubagent` omits the
-        // loop option entirely for an empty list, so no `SessionStart`/`Stop`
-        // round trip happens on a host with no hooks.
-        ...(hookEntries.length > 0
-          ? {
-              hookEntries,
-              hookSessionId: agentSession.id,
-              permissionMode: agentPolicy.mode,
-            }
-          : {}),
-        checkpointSession: agentSession,
-        ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
-        ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
-        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-        ...(opts.ctx !== undefined ? { numContext: opts.ctx } : {}),
-      },
-    );
+    // The options every run shares, whether it is one subagent or a pool of
+    // them. Built once so `--alongside` and the single-agent path cannot drift
+    // apart on permissions, hooks or sandboxing — the difference between them is
+    // concurrency, never authority.
+    const shared = {
+      ...(opts.system !== undefined ? { prompt: opts.system } : {}),
+      model: modelInput,
+      tools: opts.tools !== false,
+      // A subagent no longer inherits shell access just because tools are on.
+      // It must be opted into, and then it is still subject to the gate.
+      allowBash: opts.bash === true,
+      // Commander maps `--no-sandbox` to `sandbox: false`. Without this a
+      // subagent's bash could never run on a host with no OS sandbox, because
+      // `require` is unsatisfiable there and the operator had no way to say so.
+      sandboxEnforcement: opts.sandbox === false ? ("best-effort" as const) : ("require" as const),
+      allowNetwork: opts.network === true,
+      executeTool: (inner: (call: ToolCall) => Promise<string>) =>
+        gateForAgent(
+          (call) => inner({ id: call.id ?? "call", name: call.name, arguments: call.arguments }),
+          agentPolicy.engine,
+          agentPolicy.mode,
+          {
+            interactive: false,
+            cwd: process.cwd(),
+            root: process.cwd(),
+          },
+        ),
+      // Only carried when there is something to carry: `runSubagent` omits the
+      // loop option entirely for an empty list, so no `SessionStart`/`Stop`
+      // round trip happens on a host with no hooks.
+      ...(hookEntries.length > 0
+        ? { hookEntries, hookSessionId: agentSession.id, permissionMode: agentPolicy.mode }
+        : {}),
+      checkpointSession: agentSession,
+      ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+      ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(opts.ctx !== undefined ? { numContext: opts.ctx } : {}),
+    };
+
+    // Phase 15: the parallel path. `--alongside` turns a single subagent run
+    // into a fan-out, so it goes through the pool rather than through a second,
+    // slightly different copy of this action — the caps, the board, the
+    // injection scan and the worktree cleanup are all the pool's job, and a
+    // second code path would be a second set of them to keep correct.
+    if (opts.alongside !== undefined) {
+      const names = opts.alongside
+        .split(",")
+        .map((n) => n.trim())
+        .filter((n) => n !== "");
+      if (names.length === 0) throw new Error("--alongside needs at least one subagent name");
+
+      const specs = [spec, ...names.map((other) => {
+        const found = subagents.find((a) => a.name === other);
+        if (!found) throw new Error(`subagent "${other}" not found in AGENTS.md`);
+        return found;
+      })];
+
+      const { runPool } = await import("../orchestrator/pool.js");
+      const { createDefaultRegistry } = await import("../tools/index.js");
+      // The parent session's own reach is the ceiling for every worker, so a
+      // declaration can narrow it and nothing can raise it.
+      const parentTools = createDefaultRegistry().list().map((tool) => tool.name);
+
+      const pool = await runPool(
+        specs.map((workerSpec) => async (context) => {
+          context.task.prompt = taskText;
+          context.task.agent = workerSpec.name;
+          const out = await runSubagent({ projectContext, subagents }, workerSpec, {
+            ...shared,
+            task: taskText,
+            cwd: context.cwd,
+          });
+          return {
+            output: lastAssistantText(out.messages),
+            usage: out.usage,
+          };
+        }),
+        {
+          // One `limits` object, not two spreads: a second `limits` key would
+          // silently discard the first, so `--max-threads` and `--max-depth`
+          // together would keep only the depth cap.
+          limits: {
+            ...(opts.maxThreads !== undefined ? { maxThreads: opts.maxThreads } : {}),
+            ...(opts.maxDepth !== undefined ? { maxDepth: opts.maxDepth } : {}),
+          },
+          isolation: opts.isolation === "worktree" ? "worktree" : "none",
+          keepWorktrees: opts.keepWorktrees === true,
+          repoRoot: process.cwd(),
+          parentTools,
+          onEvent: (event) => {
+            if (event.type === "isolation-failed") console.error(`jaa: ${event.reason}`);
+            if (event.type === "task-failed") console.error(`jaa: ${event.task.id} failed: ${event.error}`);
+            if (event.type === "task-refused") console.error(`jaa: ${event.reason}`);
+          },
+        },
+      );
+
+      const { cleanupSessionCheckpoints } = await import("../checkpoint/create.js");
+      cleanupSessionCheckpoints(agentSession);
+
+      for (const task of pool.tasks) {
+        const name = task.agent ?? task.id;
+        if (task.status === "completed") {
+          console.log(`\n=== ${name} ===\n${(task.result ?? "").trim()}`);
+        } else if (task.status === "failed") {
+          console.error(`jaa: ${name} failed: ${task.error ?? "no reason recorded"}`);
+        }
+      }
+      console.error(
+        `[pool] ${pool.tasks.length} task(s) · maxThreads ${pool.limits.maxThreads} · ` +
+          `maxDepth ${pool.limits.maxDepth} · ${pool.usage.inputTokens} in / ${pool.usage.outputTokens} out`,
+      );
+      if (pool.tasks.some((task) => task.status === "failed")) process.exitCode = 1;
+      return;
+    }
+
+    const result = await runSubagent({ projectContext, subagents }, spec, { ...shared, task: taskText });
 
     // Phase 14 retention, at the one place a subagent run ends. The snapshots it
     // took live in that session's store for as long as it is on disk, so the run
@@ -1812,6 +1916,133 @@ program
       for (const error of result.errors) console.error(`jaa: ${error}`);
       process.exitCode = 1;
     }
+  });
+
+// --- tasks ----------------------------------------------------------------
+const tasks = program
+  .command("tasks")
+  .description("inspect and control the multi-agent task board (~/.jaa/tasks/)");
+
+tasks
+  .command("list")
+  .description("list tasks on the board")
+  .option("--running", "only tasks that have not finished")
+  .option("--json", "emit the raw task records")
+  .action(async (opts: { running?: boolean; json?: boolean }) => {
+    const { listTasks } = await import("../orchestrator/task.js");
+    const { unfinishedTasks } = await import("../orchestrator/background.js");
+    const all = opts.running === true ? unfinishedTasks() : listTasks();
+    if (opts.json === true) {
+      console.log(JSON.stringify(all, null, 2));
+      return;
+    }
+    if (all.length === 0) {
+      console.log(opts.running === true ? "no running tasks" : "no tasks on the board");
+      return;
+    }
+    for (const task of all) {
+      const label = task.prompt.split("\n")[0]?.trim() ?? "";
+      const bounded = label.length > 48 ? `${label.slice(0, 47)}…` : label;
+      const usage = task.usage === undefined ? "" : ` · ${task.usage.inputTokens} in / ${task.usage.outputTokens} out`;
+      const depth = task.depth > 0 ? ` · depth ${task.depth}` : "";
+      const iso = task.isolation === "worktree" ? " · worktree" : "";
+      console.log(`${task.id}  ${task.status.padEnd(9)} ${bounded || "(no prompt)"}${depth}${iso}${usage}`);
+    }
+  });
+
+tasks
+  .command("show")
+  .description("show one task in full, including its scanned result")
+  .argument("<id>", "task id")
+  .action(async (id: string) => {
+    const { loadTask, descendantsOf } = await import("../orchestrator/task.js");
+    const task = loadTask(id);
+    if (task === undefined) throw new Error(`task "${id}" is not on the board`);
+    console.log(`id:       ${task.id}`);
+    console.log(`status:   ${task.status}`);
+    console.log(`depth:    ${task.depth}`);
+    console.log(`agent:    ${task.agent ?? "(none)"}`);
+    console.log(`isolate:  ${task.isolation}${task.workdir !== undefined ? ` at ${task.workdir}` : ""}`);
+    console.log(`parent:   ${task.parent ?? "(root)"}`);
+    console.log(`children: ${task.children.length === 0 ? "(none)" : task.children.join(", ")}`);
+    if (task.usage !== undefined) console.log(`usage:    ${task.usage.inputTokens} in / ${task.usage.outputTokens} out`);
+    if (task.error !== undefined) console.log(`error:    ${task.error}`);
+    if (task.result !== undefined) {
+      console.log(`\n--- result (already scanned) ---\n${task.result}`);
+    }
+    const children = descendantsOf(task.id);
+    if (children.length > 0) {
+      console.log(`\n--- descendants (${children.length}) ---`);
+      for (const child of children) console.log(`${child.id}  ${child.status}`);
+    }
+  });
+
+tasks
+  .command("attach")
+  .description("print the results of background tasks and summarise them")
+  .argument("<ids...>", "task ids")
+  .option("--json", "emit the raw collected records")
+  .action(async (ids: string[], opts: { json?: boolean }) => {
+    const { collectResults, summarize } = await import("../orchestrator/background.js");
+    const results = collectResults(ids);
+    if (opts.json === true) {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+    const summary = summarize(results);
+    for (const line of summary.lines) console.log(line);
+    console.log(
+      `\n${summary.completed} completed · ${summary.failed} failed · ` +
+        `${summary.cancelled} cancelled · ${summary.running} running` +
+        (summary.stale > 0 ? ` · ${summary.stale} stale` : ""),
+    );
+    console.log(`${summary.usage.inputTokens} in / ${summary.usage.outputTokens} out`);
+    // A missing task is a real failure the operator asked about, so it is
+    // reflected in the exit code rather than only in the text.
+    if (summary.failed > 0) process.exitCode = 1;
+  });
+
+tasks
+  .command("stop")
+  .description("ask one or more running tasks to stop (cooperative, checked between steps)")
+  .argument("<ids...>", "task ids")
+  .action(async (ids: string[]) => {
+    const { requestStop } = await import("../orchestrator/background.js");
+    let stopped = 0;
+    for (const id of ids) {
+      if (requestStop(id)) {
+        console.log(`${id}: stop requested`);
+        stopped++;
+      } else {
+        console.log(`${id}: not stopped (unknown, already finished, or the board could not be read)`);
+      }
+    }
+    if (stopped === 0) process.exitCode = 1;
+  });
+
+tasks
+  .command("clear")
+  .description("remove finished tasks from the board")
+  .option("--yes", "skip the confirmation")
+  .action(async (opts: { yes?: boolean }) => {
+    const { listTasks, removeTask } = await import("../orchestrator/task.js");
+    const finished = listTasks().filter(
+      (task) => task.status === "completed" || task.status === "failed" || task.status === "cancelled",
+    );
+    if (finished.length === 0) {
+      console.log("no finished tasks to clear");
+      return;
+    }
+    if (opts.yes !== true) {
+      await confirmDestructive(
+        `remove ${finished.length} finished task record(s) from the board? Their results and reports are deleted with them.`,
+      );
+    }
+    let removed = 0;
+    for (const task of finished) {
+      if (removeTask(task.id)) removed++;
+    }
+    console.log(`removed ${removed} task record(s)`);
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

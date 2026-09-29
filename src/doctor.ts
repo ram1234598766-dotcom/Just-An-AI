@@ -305,8 +305,42 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
       await githubAuthCheck(opts),
       permissionsCheck(),
       await sandboxCheck(),
+      await orchestratorCheck(),
       tmpCheck(),
     ],
+  };
+}
+
+/**
+ * Report what multi-agent orchestration can actually do on this host.
+ *
+ * Two facts an operator needs before a fan-out: the caps that will be applied to
+ * it whether they asked for them or not, and whether worktree isolation is
+ * available. The second is the one that changes behaviour — a fan-out without
+ * worktrees has concurrent writers on one checkout, which corrupts files
+ * silently — so a host that cannot isolate gets a `warn`, not a footnote.
+ */
+async function orchestratorCheck(): Promise<DoctorCheck> {
+  const { DEFAULT_POOL_LIMITS, HARD_CEILING, clampLimits } = await import("./orchestrator/pool.js");
+  const { worktreeCapability } = await import("./orchestrator/isolation.js");
+  const limits = clampLimits();
+  const worktree = await worktreeCapability();
+
+  const detail =
+    `limits: maxThreads ${limits.maxThreads}, maxDepth ${limits.maxDepth}, ` +
+    `maxTasks ${limits.maxTasks} (defaults ${DEFAULT_POOL_LIMITS.maxThreads}/${DEFAULT_POOL_LIMITS.maxDepth}/${DEFAULT_POOL_LIMITS.maxTasks}, ` +
+    `hard ceiling ${HARD_CEILING.maxThreads}/${HARD_CEILING.maxDepth}/${HARD_CEILING.maxTasks}). ` +
+    (worktree.available
+      ? "Worktree isolation is available: `jaa agent run --isolation worktree` gives each parallel worker its own checkout."
+      : `Worktree isolation is NOT available (${worktree.reason ?? "unknown"}). ` +
+        "Parallel workers will share one checkout, so `jaa agent run --alongside` on overlapping files can lose writes silently. " +
+        "Use --isolation worktree in a git repository to avoid it.");
+
+  return {
+    key: "orchestrator",
+    status: worktree.available ? "ok" : "warn",
+    message: worktree.available ? "multi-agent orchestration ready" : "multi-agent ready, but without worktree isolation",
+    detail,
   };
 }
 

@@ -46,8 +46,8 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | Hooks (lifecycle events) | yes (10) | yes (9) | plugin events | yes (7) | **no** |
 | OS-level sandbox | Seatbelt/bwrap | Landlock+seccomp | pluggable | Docker | **partial** (Seatbelt/bwrap; none on Windows) |
 | Permission model | allow/deny/ask/defer | 3 policies x 3 modes | guard + monotonic deny | rule-based | **yes** (allow/deny/ask, 3 modes, deny-absolute) |
-| Multi-agent | subagents + teams + workflows | 6 threads, depth, CSV fan-out | subagents + workflows | sessions | **partial** (1 sync agent) |
-| Worktree isolation | yes | yes | -- | -- | **no** |
+| Multi-agent | subagents + teams + workflows | 6 threads, depth, CSV fan-out | subagents + workflows | sessions | **yes** (pool, worktrees, fan-out, background) -- **wins** |
+| Worktree isolation | yes | yes | -- | -- | **yes** |
 | Checkpoint / rewind | yes (Esc Esc) | fork + worktree | -- | snapshots | **no** |
 | Compaction | summarize ~95% | model-native | plugin | summarize ~90% | **partial** (truncate) |
 | Live LSP in the loop | yes | via MCP | -- | 30+ auto | **partial** (manual) |
@@ -71,30 +71,25 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 - **Eval harness in the box.** `jaa eval` ships with pass@1 / pass@N and token
   accounting. Most competitors measure you externally; jaa measures itself.
 
-### Where jaa is behind, ranked by how much it would cost to lose a user
+### Where jaa was behind, ranked by how much it would cost to lose a user
 
-1. **No real permission model.** One boolean (`allowBash`). Codex has 9
-   combinations, Claude Code has 4 decisions plus rule files. A user who works
-   on a production repo cannot use jaa safely today. This is the adoption
-   blocker.
-2. **No OS-level sandbox.** `confinePath` validates paths; it does not contain
-   a process. Once `allowBash` is true, every command runs with full user
-   privileges. Codex uses Landlock + seccomp; Claude Code uses Seatbelt. This is
-   the trust blocker.
-3. **No hooks.** All four competitors have them. It is how a team enforces
-   policy, runs linters on edit, and blocks dangerous commands. Its absence
-   makes jaa unusable in a team setting.
-4. **Multi-agent is single-threaded.** `jaa agent run` is one synchronous agent
-   with no parallelism, no worktree isolation, no background execution. This is
-   the capability gap.
-5. **No rewind.** No checkpoints means no safe experimentation. Every
-   competitor has some form.
-6. **TUI is shallow.** No multi-pane, no agent dashboard, no typed tool cards,
-   no themes or keybinds. The most visible surface is the least developed.
-7. **No plugin packaging.** Skills and subagents exist but cannot be bundled
-   and distributed as one installable unit with hooks and MCP servers.
-8. **LSP is manual.** `jaa lsp diagnose` is a one-shot command. Competitors
-   feed diagnostics into the loop after every edit.
+The list as originally ranked, with the current state of each item. Items 1-5
+are closed; the remainder is what still stands between jaa and the bar.
+
+| # | Gap | Phase | State |
+|---|---|---|---|
+| 1 | No real permission model — one boolean (`allowBash`) | 11 | **closed** — allow/deny/ask/defer, specificity ranking, deny absolute, 55 tests |
+| 2 | No OS-level sandbox — `confinePath` validates paths, it does not contain a process | 12 | **closed on macOS + Linux**, with gap **G1** (none on Windows) and **G2** (the runtime confinement gate was never executed — argv is verified, confinement is not) |
+| 3 | No hooks | 13 | **closed** — 16 events, 5 handler kinds, crash-to-deny |
+| 4 | Multi-agent single-threaded | 15 | **closed** — pool, worktrees, fan-out, background, 3 limits (L1-L3) |
+| 5 | No rewind | 14 | **closed** — checkpoint, rewind, fork, 3 known limits |
+| 6 | TUI is shallow — no multi-pane, no agent dashboard, no typed tool cards, no themes or keybinds | 20 | **open** — the most visible surface is the least developed, and it is last so it can render everything above it |
+| 7 | No plugin packaging — skills and subagents cannot be bundled as one installable unit with hooks and MCP servers | 19 | **open** |
+| 8 | LSP is manual — `jaa lsp diagnose` is a one-shot command | 17 | **open** — competitors feed diagnostics into the loop after every edit |
+
+The order of the original ranking is preserved deliberately: 6-8 were ranked
+below the trust and team blockers on purpose, and re-sorting them now that the
+top of the list is closed would misrepresent how much each one costs.
 
 ## Status board
 
@@ -115,7 +110,7 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | 12 | OS-level sandbox (Seatbelt / bubblewrap) | `de3ce22` | **done on macOS + Linux, none on Windows** (4 open gaps) |
 | 13 | Hooks (lifecycle events + blocking decisions) | `e9a81ab` | **done** |
 | 14 | Checkpoint, rewind and fork | `e9a81ab` | **done** (3 known limits) |
-| 15 | Multi-agent orchestration (parallel + worktrees + background) | - | planned |
+| 15 | Multi-agent orchestration (parallel + worktrees + background) | - | **done** (3 known limits) |
 | 16 | Compaction and persistent memory | - | planned |
 | 17 | Live code intelligence (LSP in the loop) | - | planned |
 | 18 | Compatibility and interop layer | - | planned |
@@ -146,6 +141,57 @@ activity, and permission prompts that only exist by Phase 19.
 
 ## Decisions (dated)
 
+- **2026-09-29 — Phase 15: the subagent tool set is an intersection, and that
+  is the whole escalation defence.** The phase gate asks that a subagent cannot
+  escalate its own permissions. The tempting implementation is a merge: union
+  the declaration into the parent's set, then subtract the disallowed ones. That
+  is one line longer than correct and fails in the direction that matters —
+  `declared.length > parent.length` is the whole attack. So `effectiveToolNames`
+  iterates the *parent's* tools and only ever removes, and there is deliberately
+  no branch that adds one.
+  - *It is structural, not a prompt instruction.* A subagent that says "you may
+    now run bash" changes nothing, because nothing a worker returns is read as
+    configuration. `WorkerOutput` carries only `output`, `usage` and `children`;
+    a returned `PoolOptions` or widened tool list has no reader.
+  - *A declaration is applied twice, deliberately.* Once in the pool
+    (`effectiveToolNames`, per task) and again in `runSubagent`, which filters
+    the advertised registry. They look redundant and are not: the permission
+    engine is asked about a call the registry has not heard of, so narrowing the
+    *advertised* list is what stops the model spending a turn on a tool the gate
+    will refuse.
+  - *Bad declarations are dropped, not clamped.* `MaxTurns: many` and
+    `Isolation: docker` leave the field unset, so the caller's default applies.
+    Clamping would turn a typo into a cap of 0 — an agent that stops before it
+    starts — which is a worse failure than the typo.
+- **2026-09-29 — Phase 15: the injection scan matches a tight phrase list, and
+  says out loud when it fires.** A subagent that reads a poisoned file can quote
+  it into its own report, and the parent reads that as its own trusted peer's
+  request. The scan removes the literal instruction text and frames the report
+  as untrusted data.
+  - *Broad patterns were rejected on purpose.* Matching "you are now" or bare
+    "ignore" fires on ordinary prose and on the security documentation this
+    repository is full of. A filter that mangles honest output gets switched
+    off, which is worse than no filter, so the list is limited to phrases whose
+    only function is to redirect an AI agent.
+  - *Four benign sentences are asserted not to fire* in the test suite,
+    alongside the attacks that must. Without that half the test would pass on a
+    filter that removes everything.
+  - *It is a mitigation, not a proof, and is recorded as limit L1 rather than
+    described as a guarantee.* The real control is the worker's tool set.
+  - *Peer-to-peer messages are scanned too.* A message is a more direct channel
+    than a report: worker A posts a shell command to worker B, who is mid-task
+    with tools in hand.
+- **2026-09-29 — Phase 15: background detachment is a detached child process,
+  not `fork()`.** A real `fork()` needs a native addon on Windows, which would
+  make `jaa` un-installable without a build toolchain — the same reasoning that
+  made Phase 12 decline Job Objects. `spawn` with `detached: true`,
+  `stdio: "ignore"` and `unref()` gives a worker that survives the parent's exit
+  and writes to the same board the parent reads, which is what makes
+  `jaa tasks attach` work in a process that spawned nothing.
+  - *The consequence is stated rather than papered over:* the parent holds no
+    handle, so stop cannot be a signal. It is cooperative and observable —
+    `requestStop` marks the board, the child polls, `isStale` reports a worker
+    that stopped making progress. Recorded as limit L3.
 - **2026-09-28 — Credential scanning is enforced, not just intended.**
   The repo is public, so a secret that reaches a commit reaches everyone who
   clones, and deleting the file afterwards does not remove it from history.
@@ -338,6 +384,9 @@ activity, and permission prompts that only exist by Phase 19.
 | 2026-09-25 | `npm run lint + CI=1 npm test + npm run build + npm audit --audit-level=high` | ok — 190/190 tests (17 files, +29 bench tests), 0 vulnerabilities. Phase 10 gate: `jaa bench --list` → 46 cases / 10 tags; live `jaa bench --tags debug --timeout 8000 --out <ndjson>` ran 7 cases end-to-end, all recorded as FAIL with `error: agent loop failed: fetch failed` (no local model reachable) and **no crash**; resume re-run added 0 duplicate rows. Baseline reads 0% only because no model was available on the host, not because of a code fault. Competitor parity numbers **not verified** — no competitor binary was invoked |
 | 2026-09-25 | `npm run lint + CI=1 npm test + npm run build + npm audit --audit-level=high` | ok — 268/268 tests (18 files, +55 permission tests), 0 vulnerabilities. Phase 11 gate: `jaa perm list` / `jaa perm test` verified end to end. Two independent security reviews were run; the first returned **BLOCK** with 2 critical + 6 major findings, the second found 2 further criticals in the fixes. All were fixed and each is now a named regression test: shell-operator chaining cannot widen a prefix allow, whitespace/case cannot evade a prefix deny, `./`/`../`/absolute/case path variants all hit the same rule, `full-auto` never implies bash, an MCP-provided unknown tool never inherits a mode baseline, a malformed config warns instead of silently voiding denies, and a bad `allow` no longer discards a valid `deny`. `jaa chat` was found completely ungated and is now gated |
 | 2026-09-25 | `npm publish` + `npm install -g jaa-cli` + `jaa --version` | ok — `jaa-cli@0.1.0` live on npm (tarball 103 kB, 172 files, shasum `93f4d6bb…`), global bin at `%APPDATA%/npm/jaa`, `jaa --version` → `0.1.0`. Auth via `~/.npmrc` (`//registry.npmjs.org/:_authToken=...`); first token was read-only/2FA-gated (403), replaced with a publish-scoped bypass-2FA token |
+| 2026-09-29 | `npm run lint` (Phase 15 first pass) | errors fixed in new code: `exactOptionalPropertyTypes` on the `parseModelField` return, `no-control-regex` written as literal C0 bytes in `inject.ts` (repaired by line replacement), unused `parent` set in `effectiveToolNames`, `task.startedAt = undefined` → `delete` (the board compiles with `exactOptionalPropertyTypes`, so absent and `undefined` differ), duplicate `ToolCall` import, `unfinishedTasks` imported from the wrong module |
+| 2026-09-29 | `npm run lint` + `CI=1 npm test` + `npm run build` + `npm audit --audit-level=high` | ok — **851/851 tests across 29 files** (+94 new, 0 regressions from 757/757 across 28), `npm run lint` 0 errors, `npm run build` 0, `npm audit --audit-level=high` **0 vulnerabilities**. Smoke: `jaa tasks --help` / `list` / `stop` / `attach` all correct, with exit code 1 on a failed or unknown task; `jaa doctor` reports the new `orchestrator` check; `jaa agent run --alongside nope` fails cleanly on an unknown subagent. **Phase 15 gate, all four assertions:** three workers edit one overlapping file with zero conflicts (real git worktrees, interleaved writes, each file holds exactly one writer's content end to end); the depth and thread caps hold under a deliberate fan-out bomb (3 roots × 25 children each, peak concurrency ≤ `maxThreads`); a subagent cannot escalate its own permissions (`effectiveToolNames` is an intersection, proven against a hand-edited `AGENTS.md` asking for `deploy_production` and `disable_sandbox`); injected instructions in a subagent report are neutralized (5 canonical overrides plus whitespace and control-char evasion, with 4 benign security sentences asserted not to fire) |
+| 2026-09-29 | `npm run check:secrets` | ok — `clean (174 tracked file(s) scanned)` |
 
 ## Phase log
 
@@ -892,44 +941,111 @@ dynamic workflows + `/batch` worktree fan-out; Codex `max_threads: 6`,
 `max_depth`, `spawn_agents_on_csv`, worktree isolation, auto-review; DeepSeek
 subagents + workflows + background jobs.
 
-- [ ] `src/orchestrator/task.ts` - `Task` (id, prompt, agent, status, result,
-      parent, children), a persisted task board under `~/.jaa/tasks/`
-- [ ] `src/orchestrator/pool.ts` - bounded concurrency with configurable
-      `max_threads` (default 6) and `max_depth` (default 1, matching Codex's
-      conservative default) plus a hard ceiling so a fan-out cannot run away
-- [ ] `src/orchestrator/isolation.ts` - git worktree per worker so parallel
-      agents never touch the same files; automatic cleanup including the
-      failure path, and a clear error when git is unavailable or the repo is
-      dirty in a way that blocks worktree creation
-- [ ] `src/orchestrator/background.ts` - detached workers that survive the
-      parent turn, with `jaa tasks list|attach|stop` and a completion summary
-      delivered into the parent transcript
-- [ ] `src/orchestrator/team.ts` - peer-to-peer message passing and a shared
-      task board across workers, so workers can hand off without the parent
-      relaying every message
-- [ ] `src/orchestrator/fanout.ts` - CSV and JSONL batch fan-out, one worker
-      per row, structured per-row output merged back; the Codex
-      `spawn_agents_on_csv` shape
-- [ ] `src/orchestrator/review.ts` - an independent reviewer pass over worker
-      output before it is accepted, so a worker cannot mark its own homework
-- [ ] Subagent declaration upgrades: `model`, `tools`, `disallowedTools`,
-      `skills` preload, `maxTurns`, `isolation: worktree`, `background`
-- [ ] Output scanning on every subagent report before the parent reads it --
-      a subagent that read a hostile file must not be able to inject
-      instructions into the parent conversation
-- [ ] `tests/orchestrator.test.ts` - concurrency cap, depth cap, worktree
-      isolation, background lifecycle, task-board persistence, fan-out merge,
-      reviewer independence, injection scan
+- [x] `src/orchestrator/task.ts` - `Task` (id, prompt, agent, status, result,
+      parent, children, depth, isolation), a persisted task board under
+      `~/.jaa/tasks/`. One file per task, not one board file: a run is a tree
+      written from many places at once, so a single document would make every
+      writer race for one read-modify-write and a crash would destroy every other
+      task's state. `descendantsOf` walks `children` (a parent may record a child
+      before the child's file exists); `ancestorsOf` walks `parent`; both are
+      cycle-safe because a hand-edited board can contain one
+- [x] `src/orchestrator/inject.ts` - subagent report injection scan. Control
+      characters stripped, instruction-shaped spans replaced with
+      `INJECTION_MARKER`, whole report framed as untrusted data. Matches a
+      tight phrase list rather than a broad one, so it does not fire on the
+      security documentation this repo is full of — a filter that mangles honest
+      output gets switched off
+- [x] `src/orchestrator/isolation.ts` - git worktree per worker, on its own
+      `jaa/<task-id>` branch so a fan-out is mergeable. A failure is a **typed
+      refusal**, never a fallback: if worktree creation fails the task is recorded
+      `failed` and no worker starts, because a silent continue would put N workers
+      on one checkout and corrupt it
+- [x] `src/orchestrator/pool.ts` - bounded concurrency. `maxThreads` 6,
+      `maxDepth` 1, `maxTasks` 32, clamped to a hard ceiling of 32/4/256. The
+      semaphore is held for a worker's execution only and released before
+      delegation, because holding it across children deadlocks every parent on a
+      permit a child needs. **`effectiveToolNames` is an intersection, never a
+      union**, and it is the only path from a declaration to a worker's registry
+- [x] `src/agents/types.ts` + `parser.ts` + `runner.ts` - declaration upgrades:
+      `model`, `tools`, `disallowedTools`, `skills`, `maxTurns`, `isolation`,
+      `background`. Every one only narrows. Values that cannot mean what they
+      claim (`MaxTurns: many`, `Isolation: docker`) are **dropped rather than
+      clamped**, so a typo leaves the caller's default instead of a cap of 0
+- [x] `src/orchestrator/team.ts` - peer-to-peer messaging and a shared board.
+      `TeamChannel.send` scans the body, because a forwarded message is the same
+      attack as a report: worker A reads a poisoned README and posts a shell
+      command to worker B, who is mid-task with tools in hand
+- [x] `src/orchestrator/fanout.ts` - CSV and JSONL batch fan-out, one worker per
+      row, merged back. A hand-rolled CSV reader that honours quoted fields,
+      because `String.split(",")` silently corrupts any row containing a quoted
+      comma. Requires `--fanout`
+- [x] `src/orchestrator/review.ts` - independent reviewer pass. Independence is
+      structural, not a matter of prompting: a different model by default, the
+      worker's own conclusion field withheld, and the reviewer gets no tools. A
+      crashed reviewer is `rejected`, never a silent pass
+- [x] `src/orchestrator/background.ts` - detached workers via `spawn` with
+      `detached: true` and `stdio: "ignore"`, unref'd. Not a real `fork()`: that
+      needs a native addon on Windows, the same reason Phase 12 declined Job
+      Objects. Stop is **cooperative and observable**, not a signal — the parent
+      holds no handle, so `requestStop` marks the board and the child polls
+- [x] `src/cli/index.ts` - `jaa tasks list|show|attach|stop|clear`; `--alongside`,
+      `--max-threads`, `--max-depth`, `--isolation`, `--keep-worktrees` on
+      `agent run`. The parallel path routes through the pool rather than a second
+      copy of the action, so permissions, hooks and sandboxing cannot drift apart
+      between the single-agent and multi-agent paths
+- [x] `src/doctor.ts` - an `orchestrator` check reporting the effective limits,
+      the hard ceiling, and whether worktree isolation is available. A host that
+      cannot isolate is a `warn`, because a fan-out without worktrees has
+      concurrent writers on one checkout
+- [x] `tests/orchestrator.test.ts` - 94 tests: the board, the tree walks, the
+      scan, the escalation invariant, the limits, the pool, real worktrees, the
+      team channel, fan-out, the reviewer, background, and declaration parsing
 
-**Gate:** three agents edit three overlapping files in parallel with zero
-conflicts. Depth and thread caps hold under a deliberate fan-out bomb. A
-subagent cannot escalate its own permissions. Injected instructions in a
-subagent report are neutralized.
+**Gate result:** lint 0, **851/851 tests across 29 files** (+94, 0
+regressions), build 0, audit 0. All four gate assertions pass and are named
+tests:
 
-**Risk:** token blowup and cost. Codex's own docs warn that deeper recursion
-"turns broad delegation instructions into repeated fan-out." Mitigation: the
-depth default stays at 1, the thread cap is enforced, and the fan-out tool
-requires an explicit opt-in flag.
+1. *Three agents edit three overlapping files with zero conflicts* — three real
+   git worktrees, interleaved writes, each file holding exactly one writer's
+   content end to end and the original checkout untouched.
+2. *Depth and thread caps hold under a deliberate fan-out bomb* — 3 roots each
+   delegating 25 children, peak concurrency ≤ `maxThreads`, and the refused
+   delegation is recorded on the task rather than silently dropped.
+3. *A subagent cannot escalate its own permissions* — asserted against a
+   hand-edited `AGENTS.md` asking for `deploy_production` and `disable_sandbox`;
+   neither appears, and the effective set is a subset of the parent's at every
+   depth.
+4. *Injected instructions in a subagent report are neutralized* — five canonical
+   overrides including whitespace and control-character evasion, plus role
+   reassignment, concealment, forged conversation structure and credential
+   exfiltration. Four benign security sentences are asserted **not** to fire.
+
+**Two real bugs were found and fixed by the tests rather than by review:**
+`parseVerdict("this is not approved")` returned `approved`, because a substring
+matcher reads the token `approved` out of a negation — the worst possible
+direction for one, since a reviewer saying "no" was being recorded as a pass. And
+the first pool implementation awaited roots and children sequentially, which
+silently serialised the entire fan-out and made `maxThreads` meaningless; a test
+asserting peak concurrency > 1 now guards it.
+
+#### Known limits carried out of Phase 15
+
+- [ ] **L1 -- The injection scan is a mitigation, not a proof.** It removes the
+      literal instruction text, so an exact-match defence fails, but it cannot
+      remove every paraphrase and it cannot distinguish a hostile instruction
+      from an honest one that looks like one. The honest control is the worker's
+      tool set, not a text filter at the end; the scan is defence in depth.
+- [ ] **L2 -- `TeamChannel.claim` is compare-and-set, not a lock.** The window
+      between the board read and the write is real, so two workers racing for the
+      same task can both think they won. What the check buys is that a claim is
+      *visible*, so a loser retries and finds the task taken. A losing claim
+      still needs the work done twice or abandoned.
+- [ ] **L3 -- Background stop is cooperative.** A child inside a long provider
+      call finishes that call first, so `requestStop` is not immediate and
+      returns whether the request was recorded, not whether the worker stopped.
+      `isStale` reports a worker that has stopped making progress. A real kill
+      would need the pid to be meaningful across a reboot, which is not
+      guaranteed for a detached process.
 
 ---
 

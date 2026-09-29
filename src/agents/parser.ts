@@ -17,8 +17,21 @@ const AGENTS_FILENAME = "AGENTS.md";
  *   - **Deps**: <comma-separated agent names or "none">
  *   - **Acceptance**: <criteria>
  *   - **Instructions**: <system prompt>
+ *   - **Model**: <provider id, or "provider model">
+ *   - **Tools**: <comma-separated tool names or globs>
+ *   - **DisallowedTools**: <comma-separated tool names or globs>
+ *   - **Skills**: <comma-separated skill names to preload>
+ *   - **MaxTurns**: <positive integer>
+ *   - **Isolation**: <none or worktree>
+ *   - **Background**: <true or false>
  *   ### <next-name>
  *   ...
+ *
+ * The six Phase 15 fields are optional and every one of them narrows. A value
+ * that cannot mean what it claims is dropped rather than clamped, so an
+ * unparseable `MaxTurns` leaves the agent with no cap from *this* file — the
+ * runner's own default, which is always present — instead of a cap of 0 or of
+ * `NaN`.
  */
 export function parseAgents(content: string): ParsedAgents {
   const text = content.replace(/\r\n/g, "\n");
@@ -102,7 +115,63 @@ function assignField(spec: AgentSpec, key: string, value: string): void {
     case "Instructions":
       spec.instructions = value;
       break;
+    // Phase 15 execution controls. Each is normalised here rather than at the
+    // use site, so a value that cannot mean what it claims (`MaxTurns: many`)
+    // is dropped at the boundary instead of reaching a cap that trusts it.
+    case "Model": {
+      const model = value.trim();
+      if (model !== "") spec.model = model;
+      break;
+    }
+    case "Tools": {
+      const list = splitList(value);
+      if (list.length > 0) spec.tools = list.join(", ");
+      break;
+    }
+    case "DisallowedTools": {
+      const list = splitList(value);
+      if (list.length > 0) spec.disallowedTools = list.join(", ");
+      break;
+    }
+    case "Skills": {
+      const list = splitList(value);
+      if (list.length > 0) spec.skills = list.join(", ");
+      break;
+    }
+    case "MaxTurns": {
+      const turns = Number.parseInt(value.trim(), 10);
+      // A cap of 0 or a negative number would stop the agent before it starts,
+      // and `NaN` would silently remove the cap, so both are dropped and the
+      // caller's default applies.
+      if (Number.isInteger(turns) && turns > 0) spec.maxTurns = turns;
+      break;
+    }
+    case "Isolation": {
+      const mode = value.trim().toLowerCase();
+      if (mode === "worktree" || mode === "none") spec.isolation = mode;
+      break;
+    }
+    case "Background": {
+      const flag = value.trim().toLowerCase();
+      if (flag === "true" || flag === "yes") spec.background = true;
+      else if (flag === "false" || flag === "no") spec.background = false;
+      break;
+    }
   }
+}
+
+/**
+ * Split a comma-separated AGENTS.md field into its entries.
+ *
+ * Accepts commas, whitespace, or both, because the three fields that use it are
+ * written by hand and `read_file, write_file` is as likely as `read_file,
+ * write_file` or `read_file write_file`.
+ */
+function splitList(value: string): string[] {
+  return value
+    .split(/[,\n]/)
+    .flatMap((part) => part.trim().split(/\s+/))
+    .filter((entry) => entry !== "");
 }
 
 /** Load and parse AGENTS.md from the workspace root. */
