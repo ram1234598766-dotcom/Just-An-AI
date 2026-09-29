@@ -30,6 +30,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { findExecutable } from "../utils/spawn.js";
+import { resolveJdtls } from "./java-launcher.js";
 
 export interface LspServerConfig {
   /** Stable id, used to key the session and to name a tool. */
@@ -70,6 +71,15 @@ export interface LspServerConfig {
    * have nothing for it to talk to — see the TypeScript 7 note below.
    */
   tsserverPath?: string;
+  /**
+   * Turns `command` into a line that can actually be spawned.
+   *
+   * Needed by Eclipse JDT LS, whose `jdtls` launcher is a batch file wrapping a
+   * Python script and ending in `pause`: no process can be spawned as it, and
+   * a shell is not an option. The resolver reads the Eclipse layout off the
+   * `PATH` entry and returns the `java` command line instead.
+   */
+  resolveLaunch?: (env?: NodeJS.ProcessEnv) => { command: string; args: string[]; cleanupPath?: string } | undefined;
 }
 
 /**
@@ -143,7 +153,11 @@ export const BUILTIN_SERVERS: readonly LspServerConfig[] = [
     command: "jdtls",
     extensions: [".java"],
     markers: ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle"],
-    install: "install Eclipse JDT LS and point `command` at its launcher",
+    install: "install Eclipse JDT LS and put its `bin` on PATH, or set JDTLS_HOME",
+    // A JDT LS with no JRE cannot analyse Java, and reports nothing rather
+    // than failing, so the runtime is part of availability.
+    requires: ["java"],
+    resolveLaunch: resolveJdtls,
   },
 ];
 
@@ -171,6 +185,12 @@ export interface DetectedServer {
    * `available: false` with its own reason rather than folded in.
    */
   tsserver?: string;
+  /**
+   * The line to actually spawn, when `command` had to be resolved into
+   * something spawnable. Absent for every server whose command is already
+   * directly runnable, which is most of them.
+   */
+  launch?: { command: string; args: string[]; cleanupPath?: string };
 }
 
 /**
@@ -211,20 +231,30 @@ export function detectServers(
     else if (count > 0) evidence = `${count} ${config.id} file(s) in this project`;
     if (evidence === undefined) continue;
 
-    const resolved = findExecutable(config.command);
-    // A server that drives a `tsserver` is only usable when that tsserver is
-    // present, so the two are resolved together and reported as one verdict.
-    // Checked after the command, because "the server is not installed at all" is
-    // the more fundamental problem and the more useful message.
-    if (resolved === undefined) {
-      detected.push({
-        config,
-        evidence,
-        available: false,
-        reason: `"${config.command}" is not on PATH`,
-      });
-      continue;
-    }
+  // A server whose `command` is a wrapper rather than a spawnable program is
+  // resolved here, and the *resolved* line is what gets checked and what gets
+  // run. Eclipse JDT LS is the case that matters: its `jdtls` on PATH is a
+  // batch file ending in `pause`, so passing the check here and spawning
+  // `config.command` later would fail at the worst possible moment.
+  const launch = config.resolveLaunch?.();
+  const spawnable = launch !== undefined ? launch.command : config.command;
+  const resolved = findExecutable(spawnable);
+  // A server that drives a `tsserver` is only usable when that tsserver is
+  // present, so the two are resolved together and reported as one verdict.
+  // Checked after the command, because "the server is not installed at all" is
+  // the more fundamental problem and the more useful message.
+  if (resolved === undefined) {
+    detected.push({
+      config,
+      evidence,
+      available: false,
+      reason:
+        config.resolveLaunch === undefined
+          ? `"${config.command}" is not on PATH`
+          : `JDT LS was found but "${spawnable}" is not on PATH, so it has no runtime to run on`,
+    });
+    continue;
+  }
 
     // A server that needs a toolchain it does not have is not usable, and saying
     // "available" for one that publishes nothing is the specific lie `doctor`
@@ -260,7 +290,13 @@ export function detectServers(
       tsserver = candidate;
     }
 
-    detected.push({ config, evidence, available: true, ...(tsserver !== undefined ? { tsserver } : {}) });
+    detected.push({
+    config,
+    evidence,
+    available: true,
+    ...(tsserver !== undefined ? { tsserver } : {}),
+    ...(launch !== undefined ? { launch } : {}),
+  });
   }
 
   return detected;

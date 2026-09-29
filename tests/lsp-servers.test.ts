@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -300,10 +300,33 @@ const PROBES: Probe[] = [
     args: [],
   },
   {
-    // Present on this host, but it cannot analyse Rust: no `cargo`, no `rustc`.
-    // `detectServers` reports that as its own reason, and the live probe is
-    // skipped for the same reason rather than failing on a server that is
-    // working exactly as a frontend with no compiler must.
+    // Needs a JDK to run on and a source root to consider the file part of the
+    // project. Without the source roots JDT LS reports nothing at all and looks
+    // exactly like a clean file, which is the failure this entry is here to
+    // prevent.
+    id: "java",
+    setup: {
+      "pom.xml":
+        '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n" +
+        "  <modelVersion>4.0.0</modelVersion>\n" +
+        "  <groupId>p</groupId>\n" +
+        "  <artifactId>p</artifactId>\n" +
+        "  <version>0.1.0</version>\n" +
+        "  <properties>\n" +
+        "    <maven.compiler.source>21</maven.compiler.source>\n" +
+        "    <maven.compiler.target>21</maven.compiler.target>\n" +
+        "  </properties>\n" +
+        "</project>\n",
+    },
+    file: "src/main/java/Bad.java",
+    cleanFile: "src/main/java/Clean.java",
+    broken: 'public class Bad { public static void main(String[] a) { int x = "nope"; } }\n',
+    clean: "public class Clean { public static void main(String[] a) { int x = 1; System.out.println(x); } }\n",
+    expect: /cannot convert from String to int|cannot be converted|incompatible types/i,
+    initOptions: { settings: { java: { project: { sourcePaths: ["src"] } } } },
+  },
+  {
     id: "rust",
     setup: { "Cargo.toml": '[package]\nname = "p"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n' },
     file: "src/main.rs",
@@ -348,7 +371,12 @@ describe("lsp: every registry entry, against a real server", () => {
   for (const probe of PROBES) {
     const config = BUILTIN_SERVERS.find((s) => s.id === probe.id);
     const command = probe.command ?? config?.command ?? "";
-    const present = findExecutable(command) !== undefined;
+    // Availability is decided the same way `detectServers` decides it, by
+    // asking the registry, rather than by a second, subtly different rule here.
+    // A probe that skips for one reason and detection says another is a test
+    // lying about the product.
+    const launchable = config?.resolveLaunch?.();
+    const present = launchable !== undefined || findExecutable(command) !== undefined;
     const tsserverOk = probe.id === "typescript" ? resolveTsserver("typescript5/lib/tsserver.js") !== undefined : true;
     // A server whose own declared toolchain is absent is skipped for the same
     // reason `detectServers` marks it unavailable. It is not broken; it is a
@@ -366,10 +394,16 @@ describe("lsp: every registry entry, against a real server", () => {
           timeoutMs: 120_000,
           diagnosticWaitMs: 90_000,
           createClient: (cfg, options) => {
-            const client = new LspClient(command, probe.args ?? cfg.args ?? [], {
-              cwd: options.cwd,
-              timeoutMs: options.timeoutMs,
-            });
+            // A config may resolve into a different spawnable line than its
+            // `command` — JDT LS's `command` is a batch file no process can be
+            // spawned as. The resolved launch wins, exactly as it does in the
+            // manager's own default.
+            const launch = options.launch;
+            const client = new LspClient(
+              launch?.command ?? command,
+              launch?.args ?? probe.args ?? cfg.args ?? [],
+              { cwd: options.cwd, timeoutMs: options.timeoutMs },
+            );
             if (probe.initOptions !== undefined) client.setInitializationOptions(probe.initOptions);
             return client;
           },
@@ -405,11 +439,33 @@ describe("lsp: every registry entry, against a real server", () => {
     // must be classifiable, so an unverified one cannot read as working.
     for (const probe of PROBES) {
       const config = BUILTIN_SERVERS.find((s) => s.id === probe.id);
-      const command = probe.command ?? config?.command ?? "";
-      const available = findExecutable(command) !== undefined;
+      const launchable = config?.resolveLaunch?.();
+      const available = launchable !== undefined || findExecutable(probe.command ?? config?.command ?? "") !== undefined;
       expect(typeof available, probe.id).toBe("boolean");
       if (!available) expect(config?.install, `${probe.id} must say how to install it`).toBeTruthy();
     }
+  });
+
+  it("resolves JDT LS into a line a process can actually be spawned as", () => {
+    // The launcher on PATH is a batch file that ends in `pause`. It starts, and
+    // it is not a thing `spawn` can run, so a config that passed detection on
+    // `jdtls` alone would fail at the moment of use instead.
+    const java = BUILTIN_SERVERS.find((s) => s.id === "java");
+    expect(java?.resolveLaunch, "java must resolve a spawnable line").toBeTypeOf("function");
+    const launch = java?.resolveLaunch?.();
+    if (launch === undefined) {
+      // No JDT LS here; the install hint must say how to get one.
+      expect(java?.install).toMatch(/JDT LS/);
+      return;
+    }
+    expect(launch.command).not.toMatch(/\.(bat|cmd|ps1)$/i);
+    expect(launch.command).toBe(findExecutable("java"));
+    expect(launch.args.join(" ")).toMatch(/org\.eclipse\.jdt\.ls\.core\.id1/);
+    expect(launch.args.join(" ")).toMatch(/-data\s+\S/);
+    // The workspace is created eagerly so it exists before the server is told
+    // to use it, and it is the one thing that must not be left behind.
+    expect(launch.cleanupPath).toBeTruthy();
+    expect(existsSync(launch.cleanupPath as string), "the -data directory must exist before the server starts").toBe(true);
   });
 
   it("treats a missing toolchain as unavailable, not as a working server", () => {
@@ -430,11 +486,12 @@ describe("lsp: every registry entry, against a real server", () => {
   });
 
   it("has a live probe for every registry entry", () => {
-    // An entry with no probe is an entry nobody has run. `java` is listed
-    // explicitly rather than left as a silent gap.
+    // An entry with no probe is an entry nobody has run. Every wired server now
+    // has one; a new entry added without a probe fails here rather than
+    // silently reading as working.
     const probed = new Set(PROBES.map((p) => p.id));
     const unprobed = BUILTIN_SERVERS.filter((s) => !probed.has(s.id)).map((s) => s.id);
-    expect(unprobed).toEqual(["java"]);
+    expect(unprobed, "add a live probe for this server, or do not ship it").toEqual([]);
   });
 });
 

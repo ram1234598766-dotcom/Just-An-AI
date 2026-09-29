@@ -29,7 +29,7 @@
  * disabled and later calls answer immediately from that fact.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { LspClient } from "./client.js";
@@ -69,7 +69,10 @@ export interface LspManagerOptions {
   /** How long to wait for a push-mode server to publish. */
   diagnosticWaitMs?: number;
   /** Injectable for tests; defaults to the real client. */
-  createClient?: (config: LspServerConfig, options: { cwd: string; timeoutMs: number; tsserver?: string }) => LspClient;
+  createClient?: (
+    config: LspServerConfig,
+    options: { cwd: string; timeoutMs: number; tsserver?: string; launch?: { command: string; args: string[]; cleanupPath?: string } },
+  ) => LspClient;
   servers?: readonly LspServerConfig[];
 }
 
@@ -177,13 +180,24 @@ export class LspManager {
       }
       return { status: "ok", result, language };
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Still indexing, not broken. Eclipse JDT LS answers `initialize` and then
+      // spends a long time loading a project; reporting that as a failed server
+      // tells the user their Java is broken when it is merely not ready, and
+      // telling them "no errors" instead would be worse.
+      if (session.client.isStarting) {
+        return {
+          status: "unavailable",
+          reason: `the ${language} language server is still starting up. It indexes the project before it can report anything; try again in a moment.`,
+        };
+      }
       // A server that fails mid-request is treated as crashed, and the session is
       // reset so the next call gets a clean one.
-      this.reset(language, `request failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.reset(language, `request failed: ${message}`);
       return {
         status: "error",
         language,
-        reason: `the ${language} language server failed: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `the ${language} language server failed: ${message}`,
       };
     }
   }
@@ -234,6 +248,13 @@ export class LspManager {
         // A server that will not shut down cleanly must not fail the turn.
       })),
     );
+    // A resolved launch may have created a scratch directory to hold server
+    // state — JDT LS writes a full index into one — and it is not left behind.
+    for (const session of live) {
+      const scratch = this.detectedById.get(session.config.id)?.launch?.cleanupPath;
+      if (scratch === undefined) continue;
+      rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
   }
 
   // --- internals -----------------------------------------------------------
@@ -257,7 +278,10 @@ export class LspManager {
     const create =
       this.options.createClient ??
       ((config, options) => {
-        const client = new LspClient(config.command, config.args ?? [], {
+        // A resolved launch replaces the config's command: for JDT LS, `jdtls`
+        // itself is a batch file no process can be spawned as, and the resolved
+        // line is the `java` command that starts the same server.
+        const client = new LspClient(options.launch?.command ?? config.command, options.launch?.args ?? config.args ?? [], {
           cwd: options.cwd,
           timeoutMs: options.timeoutMs,
         });
@@ -272,6 +296,7 @@ export class LspManager {
       cwd: this.options.root,
       timeoutMs: this.options.timeoutMs ?? DEFAULT_DIAGNOSTIC_TIMEOUT_MS,
       ...(detected.tsserver !== undefined ? { tsserver: detected.tsserver } : {}),
+      ...(detected.launch !== undefined ? { launch: detected.launch } : {}),
     });
 
     const session: Session = { config: detected.config, client };
