@@ -112,7 +112,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 14 | Checkpoint, rewind and fork | `e9a81ab` | **done** (3 known limits) |
 | 15 | Multi-agent orchestration (parallel + worktrees + background) | `62adbe8` | **done** (3 known limits) |
 | 16 | Compaction and persistent memory | `5c825eb` | **done** (2 known limits) |
-| 17 | Live code intelligence (LSP in the loop) | `b6d2a37` | **done** (2 known limits) |
+| 17 | Live code intelligence (LSP in the loop) | `b6d2a37` | **done** (2 known limits, 1 claim retracted) |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
 | 20 | TUI overhaul (multi-pane, tool cards, dashboard) | - | planned |
@@ -490,6 +490,8 @@ activity, and permission prompts that only exist by Phase 19.
 | 2026-09-29 | four defects found only by driving the real `typescript-language-server` | (1) `spawn` of an npm shim is `ENOENT`/`EINVAL` on Windows, so Phase 8's `lsp diagnose` could never have worked here; (2) the server gates all publishing on a client capability the LSP spec does not define (`textDocument.publishDiagnostics`), read out of its bundled source — omitting it yields a silent server; (3) notifications were read from `result` instead of `params`; (4) the server publishes `file:///c%3A/…` against a client that sent `file:///C:/…`, so every publish landed under an unreachable key. Verified fixed by a real end-to-end run: a file with `const wrong: number = "not a number"` reports `Type 'string' is not assignable to type 'number'` at 3:14 and `5:3`, and a clean control file reports 0 |
 | 2026-09-29 | `npm i -D @ast-grep/napi` then `npm uninstall @ast-grep/napi` | **net zero, deliberately.** Installed and verified working (parses this repository and extracts `runAgentLoop`, `drive`, `createHookWiring` … structurally, so tree-sitter is genuinely available here). Then concluded the language server already provides definition, references, hover and symbols *semantically*, and that detection-by-parsing needed only extension scanning plus a project marker. An unused native module in a package that must install with no toolchain is a net negative, so it was removed. Recorded as limit L7 — "we tried the obvious tool and it was redundant" is a result |
 | 2026-09-29 | `npm i -D typescript5@npm:typescript@5.9.3` | ok — resolved 5.9.3, ships `lib/tsserver.js`, `npm run lint` and `npm run build` unchanged. The project's own `typescript@^7.0.2` is untouched: aliased, dev-only, never on the build path. **Runtime `dependencies` unchanged**, so there is no bundle delta beyond the new source |
+| 2026-09-29 | `winget install Rustlang.Rustup` + `rustup component add rust-analyzer` | ok — cargo 1.98.1, rustc 1.98.1, rust-analyzer 1.98.1. Needed to close the last probeable registry entry. The component step is not optional: `~/.cargo/bin/rust-analyzer.exe` is a rustup *proxy* that exits 1 when the component is absent, which looks exactly like a broken server |
+| 2026-09-29 | Live-probed every registry entry with a real project | typescript, python, rust, go, cpp all report a real error in a broken file and **nothing** in a clean control file. `java` has no JDT LS on this host and stays unproven (limit L7). This is what turned up the pull-diagnostics bug below — every fixture was wrong in a way only a real server could explain |
 
 ## Phase log
 
@@ -1319,11 +1321,24 @@ drive. The project's own `typescript@^7.0.2` type gate is untouched.
 
 #### Known limits carried out of Phase 17
 
-- [ ] **L6 — Diagnostics are on the request, not on the saved session.** Like
-      Phase 16, the loop compacts and here the loop *diagnoses* without mutating
-      the transcript, so `jaa session show` still shows the agent's claim rather
-      than the compiler's. The TUI shows the injected diagnostics live.
-- [ ] **L7 — `@ast-grep/napi` was installed, verified and removed.** It works
+- [x] **L6 (corrected) — Diagnostics *were* being persisted; the claim was
+      wrong.** The original draft said the loop "diagnoses without mutating the
+      transcript, so `jaa session show` still shows the agent's claim rather than
+      the compiler's". That is not what happens. `withDiagnostics` writes its
+      verdict into the `write_file` result, that result is in `result.messages`,
+      and the persisted delta is a slice of that same array — so
+      `tests/lsp-servers.test.ts` drives the full loop, saves, reloads, and
+      asserts the compiler's sentence is still there beside the agent's "done".
+      The wrapper is now `withDiagnostics()` in `src/lsp/loop.ts` instead of an
+      inline block in the CLI, and it is covered rather than asserted. Recorded
+      because a limit that is not real is worse than no limit: it would have
+      been used to justify not building the thing.
+- [ ] **L7 — `java` is the one registry entry with no live proof.** It is wired,
+      detected and offered with an install hint, but there is no JDT LS on this
+      host, so unlike TypeScript, Python, Rust, Go and C++ nobody has watched it
+      report a real error in a real file. `tests/lsp-servers.test.ts` asserts
+      this gap by name rather than letting it read as working.
+- [ ] **L8 — `@ast-grep/napi` was installed, verified and removed.** It works
       (it parses this repository and extracts `runAgentLoop`, `drive`,
       `createCheckpointRecorder` … structurally), but the language server already
       provides definition, references, hover and symbols *semantically*, and
