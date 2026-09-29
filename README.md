@@ -216,9 +216,14 @@ bubblewrap provides the same guarantees without a compiled helper, and asking fo
 npm i -g jaa-cli
 jaa setup            # interactive: pick a provider, paste your key
 jaa doctor           # verify node/git/tmp + provider status
+jaa                  # open the TUI (in a terminal)
 jaa ask "fix the typo in src/foo.ts"
-jaa chat             # interactive Ink TUI
+jaa chat --lsp       # the same, with a real compiler checking your edits
 ```
+
+`jaa` with no arguments opens the chat TUI when it is talking to a terminal, and
+prints help when it is not — so `jaa | less`, `$(jaa)` and CI all still get text.
+See **[docs/tui.md](docs/tui.md)** for the keys and commands.
 
 Keys live only in `~/.jaa/.env` (mode 0600 on POSIX) or environment variables.
 Precedence: process env > project `.env` > `~/.jaa/.env`. Local providers
@@ -229,7 +234,7 @@ Precedence: process env > project `.env` > `~/.jaa/.env`. Local providers
 | Command | Purpose |
 |---------|---------|
 | `jaa ask "<prompt>"` | One-shot agent run (optionally `--save`, `--resume`, `--provider`, `--model`, `--max-turns`, `--token-budget`, `--temperature`, `--ctx`, `--no-tools`, `--no-bash`, `--no-skills`, `--no-sandbox`, `--allow-network`) |
-| `jaa chat` | Interactive Ink TUI (also accepts `--no-sandbox`, `--allow-network`) |
+| `jaa chat` | Interactive TUI (also `--no-sandbox`, `--allow-network`, `--lsp`) — see [docs/tui.md](docs/tui.md) |
 | `jaa session list|show|remove` | Conversation history |
 | `jaa agent list|show|run <name> [task]` | Subagents defined in `AGENTS.md` (`run` also accepts `--allow-bash`, `--no-sandbox`, `--allow-network`, `--permission-mode`) |
 | `jaa skill list|install|remove` | `SKILL.md` skills with autotrigger |

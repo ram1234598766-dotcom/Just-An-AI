@@ -115,7 +115,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 17 | Live code intelligence (LSP in the loop) | `b6d2a37` | **done** (1 known limit, 2 claims retracted) |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
-| 20 | TUI overhaul (multi-pane, tool cards, dashboard) | - | planned |
+| 20 | The TUI, and making it the default | - | **done** (2 known limits) |
 
 ### Dependency order
 
@@ -1363,6 +1363,87 @@ drive. The project's own `typescript@^7.0.2` type gate is untouched.
       native module in a package that must install with no toolchain is a net
       negative, so it is not a dependency. Recorded because "we tried the obvious
       tool and it was redundant" is a result.
+
+---
+
+### Phase 20 - The TUI, and making it the default
+
+**Gap closed:** the primary surface. Phase 17 put a language server in the loop;
+this makes the loop legible while it runs, and puts it where a person lands first.
+
+- [x] `src/tui/render.ts` — line kinds including `diagnostic`, fenced-code
+      splitting, tool-card state, and pure formatters (duration, tokens, gauge)
+- [x] `src/tui/components.tsx` — the status bar, tool cards, boxed code blocks
+- [x] `src/tui/commands.ts` — the slash-command set, and the line-editing and
+      history operations behind the keys
+- [x] `src/tui/app.tsx` — streaming paint, tool-card lifecycle, command dispatch,
+      key bindings
+- [x] `src/cli/tui-default.ts` — the TTY gate, and bare `jaa` as the default
+- [x] `docs/tui.md` — what is on screen, the keys, and how it is tested
+
+#### Decisions
+
+**Bare `jaa` opens the TUI, but only in a terminal.** Every condition in
+`shouldLaunchTui` protects a caller that is not a person: both ends must be a
+TTY, `CI` wins over everything, and `JAA_NO_TUI` is the escape hatch. A TUI into
+a pipe is unreadable and a non-TTY stdin means nobody is there to type, and the
+failure mode for getting that wrong is a hung job rather than a wrong word. The
+command itself reuses the `chat` action rather than reimplementing it, because a
+chat that behaves differently depending on how it was started would be two
+products and the one you get by accident is the one that gets trusted.
+
+**Streaming is opt-in and falls back three times.** `onStreamDelta` is set only
+by a host that wants tokens, so a caller that does not pays nothing. When it is
+set and the adapter has a stream, three things are guarded: a stream that yields
+nothing falls back to the real call, because the stream is text-only and a tool
+turn would otherwise be lost; a stream that dies mid-turn falls back and reports
+`onStreamReplace`, because a partial answer presented as a finished one is the
+failure to avoid; and a stream that reports no usage is estimated, because a
+zero-token turn is not a free turn and a gauge reading 0 never warns.
+
+**Rows that change cannot live in `Static`.** A `Static` item is written once
+and never repainted, so a row that grows — streamed text, or a tool card moving
+from running to a verdict — would be painted as a new row per update and stack up
+on screen. Finished rows go to `Static`; the moving ones live in ordinary state
+and are committed when they stop changing. The same reason keeps an expanded tool
+card out of `Static`: it could not be collapsed again.
+
+**Diagnostics are drained, not pushed.** The host's `withDiagnostics` wrapper is
+built before the TUI exists, so a report can be produced before anyone is
+listening; a callback would drop exactly those. A queue drained after each tool
+result cannot.
+
+#### Verification
+
+- `tests/tui-stream.test.tsx` — streaming paint, no doubled message, a code fence
+  arriving across deltas, the non-streaming fallback, a card's full lifecycle,
+  every slash command, and every key binding including the two-press quit
+- `tests/tui-commands.test.ts`, `tests/tui-render-new.test.ts` — the pure
+  functions, including the three cases where the obvious implementation is wrong
+- `tests/tui-default.test.ts` — the TTY gate, each condition separately
+- `tools/tui-render-check.mts` — the real renderer against a TTY-shaped stream
+
+Two real bugs came out of the render check rather than the component tests. Ink
+throws from its input handler when the stream cannot do raw mode, which printed a
+stack trace over the operator's own prompt; `startChat` now supplies the stream
+Ink uses and reports the capability to the component. And an empty prompt rendered
+no caret at all, because the status line had replaced it — the two are now
+stacked, so you can see both where to type and what just happened.
+
+#### Known limits carried out of Phase 20
+
+- [ ] **L1 - No pty test on a headless Windows host.** The component is driven
+      through `ink-testing-library` and the real renderer is driven through a
+      TTY-shaped stream, but neither is a real console, so cursor motion and
+      repaint behaviour are not verified end to end. `node-pty` was installed and
+      fails with `AttachConsole` outside an interactive session. Stated rather
+      than worked around: a layout that passes both harnesses and is unreadable in
+      a shell is a real gap, not a hypothetical one.
+- [ ] **L2 - Only the OpenAI-compatible adapter streams.** `ChatStreamChunk`
+      exists on the adapter interface and the Anthropic, Google and Ollama
+      adapters do not implement it yet, so those get the non-streaming path and
+      the text still appears — just all at once. The interface and the fallback
+      are in place; the adapters are the remaining work.
 
 ---
 
