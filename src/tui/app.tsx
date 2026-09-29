@@ -9,7 +9,10 @@ import type {
   CompactionNotice,
 } from "../agent/loop.js";
 import type { ChatMessage, ResolvedModel, ToolCall, ToolDef } from "../providers/types.js";
-import { clip, formatToolCall, linesFromMessages, summarize, summarizeToolResult } from "./render.js";
+import { estimateMessageTokens } from "../agent/budget.js";
+import { clip, expandMarkdown, formatTokens, formatToolCall, linesFromMessages, summarize, toolResultBody } from "./render.js";
+import { COMMANDS, deleteToStart, deleteWordBack, helpText, isCommand, isKnownCommand, matchingCommands, parseCommand, walkHistory } from "./commands.js";
+import { LineView, StatusBar } from "./components.jsx";
 import type { Line, LineKind } from "./render.js";
 import type { Skill } from "../skills/types.js";
 import { matchSkills, skillContext } from "../skills/index.js";
@@ -36,10 +39,42 @@ export interface ChatAppProps {
    resumeMessages: ChatMessage[];
   sessionId?: string;
   onTurnEnd?: (result: AgentLoopResult) => void;
+  /**
+   * Asked to quit. Supplied by the host, which owns the process: a test renders
+   * the component with no terminal to close, and a component that called
+   * `process.exit` would take the test runner with it.
+   */
+  onExit?: () => void;
+  /**
+   * Whether the prompt should accept keystrokes, default true.
+   *
+   * Ink mounts a raw-mode input handler for anything that calls `useInput`, and
+   * on a host with no raw-mode stdin that handler throws. `jaa chat` already
+   * refuses to start without a TTY, so this is only a switch for a host that
+   * renders the component deliberately — a test, or an embedder with its own
+   * input handling. It is not a substitute for that guard.
+   */
+  interactive?: boolean;
   /** Pre-loaded skills for autotrigger. When a user message matches a skill's
       triggers, the skill body is injected as a system message before the
       model call. */
   skills?: Skill[];
+  /**
+   * Take any compiler reports collected so far, for the user's eyes.
+   *
+   * A drain rather than a push, and that is a consequence of ordering rather
+   * than a preference: the host's diagnostics wrapper is built before this
+   * component exists and runs during tool calls, so a report can be produced
+   * before anyone is listening. A callback would drop exactly those. Draining
+   * after each tool result cannot.
+   *
+   * Optional and independent of the model. The diagnostics still ride on the
+   * tool result, so they reach the model and the saved session whether or not
+   * this is supplied; this only adds transcript rows, and as a row of its own —
+   * so "the compiler found 3 problems" cannot be misread as the model reporting
+   * on its own work.
+   */
+  drainDiagnostics?: () => { text: string; path: string }[];
   /**
    * Phase 13 hook wiring, handed to `runAgentLoop` untouched.
    *
@@ -100,6 +135,12 @@ type PendingLine = readonly [kind: LineKind, text: string, meta?: string];
  */
 const ESC_DOUBLE_TAP_MS = 600;
 
+/** The file name alone, for a diagnostics row: the path is already in context. */
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] ?? path;
+}
+
 /**
  * One row of the `/rewind` picker.
  *
@@ -129,40 +170,6 @@ interface ConfirmState {
   /** Files the restore would rewrite, and messages it would drop. */
   files: string[];
   dropped: number;
-}
-
-function colorFor(kind: LineKind): "blue" | "yellow" | "red" | undefined {
-  switch (kind) {
-    case "user":
-      return "blue";
-    case "toolCall":
-      return "yellow";
-    case "error":
-      return "red";
-    default:
-      return undefined;
-  }
-}
-
-function prefixFor(kind: LineKind): string {
-  switch (kind) {
-    case "user":
-      return "❯ ";
-    case "toolCall":
-      return "→ ";
-    case "toolResult":
-      return "↳ ";
-    // Phase 16: a prefix, not a colour. `colorFor` deliberately returns
-    // undefined for both, so a compaction marker is not mistaken for the model
-    // speaking — which matters because it is the record of something the user
-    // paid for.
-    case "compact":
-      return "~ ";
-    case "notice":
-      return "! ";
-    default:
-      return "";
-  }
 }
 
 function errorText(err: unknown): string {
@@ -287,11 +294,72 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
   }, [props.resumeMessages, props.systemPrompt]);
   const initialLines = useMemo(() => linesFromMessages(initialMessages), [initialMessages]);
   const idRef = useRef(initialLines.length);
+  /**
+   * Rows that are finished and will never change again. Rendered in `Static`,
+   * which paints each row exactly once and hands the terminal back.
+   */
   const [lines, setLines] = useState<Line[]>(initialLines);
+  /**
+   * Rows that are still changing: the assistant's streaming text, and the tool
+   * card currently running.
+   *
+   * These cannot go in `Static`. A `Static` item is written to the terminal once
+   * and never repainted, so a row that grows — one token at a time, or a tool
+   * card that changes from running to a verdict — would be painted as a new row
+   * per update and stack up on screen. Keeping the moving parts in ordinary
+   * state is what lets one row be updated in place. They are committed to
+   * `lines` when the turn ends.
+   */
+  const [live, setLive] = useState<Line[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
+  const [caret, setCaret] = useState(0);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
+  /**
+   * Whether the prompt can take keys.
+   *
+   * Supplied by the host rather than sniffed here, because Ink's own capability
+   * check is the authority — it is the thing that throws if this answer is
+   * wrong. `startChat` reads it from Ink and passes it down; a test renders with
+   * its own input stream and says what that stream can do.
+   *
+   * Default true, so a host that passes nothing gets the input-enabled TUI and
+   * the same behaviour as before.
+   */
+  const interactive = props.interactive ?? true;
+  const [notice, setNotice] = useState<string | undefined>(undefined);
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const [draft, setDraft] = useState("");
+  const [ticks, setTicks] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [usage, setUsage] = useState({ inputTokens: 0, outputTokens: 0 });
+  const [turns, setTurns] = useState(0);
+  const [quitArmed, setQuitArmed] = useState(false);
+  /**
+   * Set while the operator is looking at a tool card, so Ctrl+R knows what it is
+   * toggling.
+   *
+   * The expansion itself lives in the card's own state; this only remembers
+   * which card Ctrl+R was last pressed for, because a finished card has been
+   * committed to `Static` and can no longer be re-rendered by changing it there.
+   */
+  const [focusedCard, setFocusedCard] = useState<number | null>(null);
+
+  const exit = useCallback(() => {
+    props.onExit?.();
+  }, [props]);
+
+  /** The running tool card's row id, so a result patches the right row. */
+  const runningToolRef = useRef<number | null>(null);
+  const toolStartedRef = useRef(0);
+  /** The assistant text painted so far this turn. */
+  const streamTextRef = useRef("");
+  /** The first row id of the streamed message, or null before its first delta. */
+  const streamRowRef = useRef<number | null>(null);
+  /** How many transcript rows the streamed message currently occupies. */
+  const streamCountRef = useRef(0);
 
   const addLines = useCallback((pending: PendingLine[]) => {
     const next: Line[] = pending.map(([kind, text, meta]) => {
@@ -302,13 +370,173 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
     setLines((prev) => [...prev, ...next]);
   }, []);
 
+  /**
+   * A tool card, added in the `running` state and updated in place.
+   *
+   * It lives in `live` rather than `lines` for as long as it is running, and is
+   * committed when it finishes. A card is something the operator watches rather
+   * than reads past, so it must be able to change from "running" to a verdict
+   * on the same line.
+   */
+  const startToolCard = useCallback((call: ToolCall) => {
+    const id = idRef.current++;
+    runningToolRef.current = id;
+    toolStartedRef.current = Date.now();
+    setLive((prev) => [
+      ...prev,
+      {
+        id,
+        kind: "toolCall",
+        text: formatToolCall(call),
+        tool: { name: call.name, args: clip(call.arguments, 140), state: "running", expanded: false },
+      },
+    ]);
+  }, []);
+
+  const finishToolCard = useCallback((_call: ToolCall, result: string, ok: boolean) => {
+    const id = runningToolRef.current;
+    if (id === null) return;
+    runningToolRef.current = null;
+    const elapsedMs = Date.now() - toolStartedRef.current;
+    setLive((prev) => {
+      const next = prev.map((line) => {
+        if (line.id !== id || line.tool === undefined) return line;
+        return {
+          ...line,
+          tool: {
+            ...line.tool,
+            // Narrowed to the literal union, not `string`, so the card's state
+            // stays one of the three things a reader can be told.
+            state: ok ? ("ok" as const) : ("failed" as const),
+            elapsedMs,
+            result: toolResultBody(result, false),
+          },
+        };
+      });
+      // The card has stopped changing, so it can be handed to `Static`.
+      setLines((committed) => [...committed, ...next.filter((line) => line.id === id)]);
+      return next.filter((line) => line.id !== id);
+    });
+  }, []);
+
+  const toggleToolCard = useCallback(() => {
+    const flip = (row: Line): Line => {
+      if (row.tool === undefined || row.tool.result === undefined) return row;
+      const expanded = !row.tool.expanded;
+      setFocusedCard(row.id);
+      return { ...row, tool: { ...row.tool, expanded, result: toolResultBody(row.tool.result, expanded) } };
+    };
+    // The remembered card first, so a second Ctrl+R collapses the same card
+    // rather than hunting for a newer one. Then the most recent, because with
+    // nothing remembered the operator means the newest tool.
+    const target = focusedCard;
+    if (target !== null) {
+      const applied = (rows: Line[]): Line[] | undefined => {
+        const index = rows.findIndex((row) => row.id === target);
+        if (index === -1) return undefined;
+        const next = [...rows];
+        const flipped = next[index];
+        if (flipped === undefined) return undefined;
+        next[index] = flip(flipped);
+        return next;
+      };
+      const inLive = applied(live);
+      if (inLive !== undefined) {
+        setLive(inLive);
+        return;
+      }
+      const inLines = applied(lines);
+      if (inLines !== undefined) {
+        setLines(inLines);
+        return;
+      }
+    }
+   // Nothing remembered, so the operator means the newest card — which is in
+   // whichever list it was left in. The list is chosen here rather than by
+   // trying each in turn, because a state updater that finds nothing still
+   // "succeeds" and would stop the search before it reached the right list.
+   const newestIn = (rows: Line[]): Line | undefined => {
+   for (let i = rows.length - 1; i >= 0; i--) {
+   const row = rows[i];
+   if (row !== undefined && row.tool !== undefined && row.tool.result !== undefined) return row;
+   }
+   return undefined;
+   };
+   const newest = newestIn(live) ?? newestIn(lines);
+   if (newest === undefined) return;
+   if (live.some((row) => row.id === newest.id)) {
+   setLive((prev) => prev.map((row) => (row.id === newest.id ? flip(row) : row)));
+   return;
+   }
+   setLines((prev) => prev.map((row) => (row.id === newest.id ? flip(row) : row)));
+  }, [focusedCard, live, lines]);
+
+  /** Re-render while a turn runs, so the elapsed timer advances. */
+  useEffect(() => {
+    if (!busy) {
+      setElapsed(0);
+      return;
+    }
+    const started = Date.now();
+    setElapsed(0);
+    const timer = setInterval(() => setElapsed(Date.now() - started), 250);
+    setTicks((n) => n + 1);
+    return () => clearInterval(timer);
+  }, [busy]);
+
+  /**
+   * Paint a streamed fragment.
+   *
+   * One row is reused for the whole message rather than a row per delta. A row
+   * per fragment would put thousands of rows in a `Static` list that never
+   * repaints, so the first delta creates the row and every later one replaces
+   * its text. The row is re-expanded through `expandMarkdown`, so a code fence
+   * typed halfway through renders as code as soon as its closing fence arrives.
+   */
+  const appendDelta = useCallback((delta: string) => {
+    streamTextRef.current += delta;
+    const text = streamTextRef.current;
+    const first = streamRowRef.current;
+    setLive((prev) => {
+      const expanded = expandMarkdown(text, first ?? idRef.current);
+      if (expanded.length === 0) return prev;
+      if (first === null) {
+        streamRowRef.current = expanded[0]?.id ?? null;
+        streamCountRef.current = expanded.length;
+        idRef.current += expanded.length;
+        return [...prev, ...expanded];
+      }
+      // Replace exactly the rows the previous expansion produced, which are the
+      // last `streamCount` of them. Slicing on the recorded count rather than
+      // searching for ids is what keeps this correct when a delta adds or
+      // removes a row — a closed code fence changes the row count mid-stream.
+      const count = streamCountRef.current;
+      const head = prev.length - count;
+      if (head < 0) return prev;
+      streamCountRef.current = expanded.length;
+      idRef.current += expanded.length - count;
+      return [...prev.slice(0, head), ...expanded, ...prev.slice(head + count)];
+    });
+  }, []);
+
   const submit = useCallback(
     async (raw: string) => {
       const content = raw.trim();
       if (!content || busy) return;
       setInput("");
+      setCaret(0);
+      setQuitArmed(false);
       setBusy(true);
       setStatus("thinking …");
+      setNotice(undefined);
+      streamTextRef.current = "";
+      streamRowRef.current = null;
+      streamCountRef.current = 0;
+      // The draft is only saved once the prompt is accepted, so walking history
+      // back with ↑ does not fill the box with half-typed junk.
+      setDraft("");
+      setHistory((prev) => (prev[prev.length - 1] === content ? prev : [...prev, content]));
+      setHistoryIndex(0);
       addLines([["user", content]]);
       const matched = props.skills ? matchSkills(props.skills, content) : [];
       const skillCtx = matched.length > 0 ? skillContext(matched) : "";
@@ -328,16 +556,91 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
           ...(props.tokenBudget !== undefined ? { tokenBudget: props.tokenBudget } : {}),
           ...(props.temperature !== undefined ? { temperature: props.temperature } : {}),
           ...(props.numContext !== undefined ? { numContext: props.numContext } : {}),
+          // Paint as the text arrives. The adapter is asked for a stream only
+          // because this is set, and the loop falls back to a single call when
+          // the provider has no stream — so a provider that cannot stream still
+          // works, just without the effect.
+          onStreamDelta: (delta) => {
+            appendDelta(delta);
+          },
+          // A turn whose stream died is re-run, and the retry is announced as a
+          // replacement. Without this the transcript would read the partial text
+          // followed by the whole one.
+          onStreamReplace: (text) => {
+            streamTextRef.current = text;
+            const first = streamRowRef.current;
+            setLive((prev) => {
+              if (first === null) {
+                const expanded = expandMarkdown(text, idRef.current);
+                if (expanded.length === 0) return prev;
+                streamRowRef.current = expanded[0]?.id ?? null;
+                idRef.current += expanded.length;
+                streamCountRef.current = expanded.length;
+                return [...prev, ...expanded];
+              }
+              const count = streamCountRef.current;
+              const head = prev.length - count;
+              if (head < 0) return prev;
+              const expanded = expandMarkdown(text, first);
+              idRef.current += expanded.length - count;
+              streamCountRef.current = expanded.length;
+              return [...prev.slice(0, head), ...expanded, ...prev.slice(head + count)];
+            });
+          },
+          onToolCall: (call) => {
+            startToolCard(call);
+          },
           onAssistantMessage: (msg) => {
-            const pending: PendingLine[] = [];
-            if (msg.content) pending.push(["assistant", msg.content]);
-            for (const call of msg.toolCalls ?? []) pending.push(["toolCall", formatToolCall(call)]);
-            if (pending.length > 0) addLines(pending);
+            // A streamed message has already been painted row by row, and adding
+            // it again would duplicate the whole reply. Only a message that never
+            // streamed — the fallback path, or a tool-call round with no text —
+            // needs a row here.
+            if (msg.content !== "" && streamTextRef.current === "") {
+              const expanded = expandMarkdown(msg.content, idRef.current);
+              idRef.current += expanded.length;
+              addLines(expanded.map((row) => [row.kind, row.text, row.meta] as PendingLine));
+            }
+            // The message is finished, so its rows stop changing and can be
+            // handed to `Static`. Anything still running in `live` — a later tool
+            // card — is left alone.
+            const count = streamCountRef.current;
+            if (count > 0) {
+              setLive((prev) => {
+                const head = prev.length - count;
+                if (head < 0) return prev;
+                const finished = prev.slice(head, head + count);
+                setLines((committed) => [...committed, ...finished]);
+                return [...prev.slice(0, head), ...prev.slice(head + count)];
+              });
+            }
+            streamTextRef.current = "";
+            streamRowRef.current = null;
+            streamCountRef.current = 0;
           },
-          onToolResult: (_call, result, ok) => {
-            const { text, meta } = summarizeToolResult(result, ok);
-            addLines([["toolResult", text, meta]]);
+          onToolResult: (call, result, ok) => {
+            finishToolCard(call, result, ok);
+            // Drained here, after the tool result that caused it. A report with
+            // no text means the file is clean, and saying so on every write
+            // would be noise.
+            for (const report of props.drainDiagnostics?.() ?? []) {
+              if (report.text === "") continue;
+              addLines([["diagnostic", report.text, basename(report.path)]]);
+            }
           },
+          /**
+           * The compiler's verdict on a file the agent just wrote, as its own row.
+           *
+           * `withDiagnostics` also appends it to the tool result, so it reaches
+           * the model and the saved session either way. This is for the *user*:
+           * the model saying "done" and the compiler disagreeing is the single
+           * most important thing to see in this transcript, and it has to be
+           * visually distinct from both, or it reads as something the model said
+           * about its own work.
+           */
+          // The compiler's verdict, drawn as its own row. Drained after the tool
+          // result it belongs to, so a report produced while this component was
+          // still mounting is not lost.
+          ...(props.drainDiagnostics !== undefined ? { onDiagnostics: props.drainDiagnostics } : {}),
           // Present only when the host supplied them, never as an empty object:
           // `runAgentLoop` reads `hooks === undefined` and `checkpoints ===
           // undefined` to decide there is no wiring, so an absent property is
@@ -366,19 +669,23 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
         setMessages(result.messages);
         setCurrentTurn(result.turnIndex ?? result.messages.length);
         setCheckpointEpoch((epoch) => epoch + 1);
+        setUsage(result.usage);
+        setTurns((n) => n + result.turns);
         setStatus(
-          `${result.stopReason} · ${result.turns} turn(s) · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out` +
-            (props.sessionId ? ` · session ${props.sessionId}` : ""),
+          `${result.stopReason} · ${result.turns} turn(s) · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out`,
         );
         props.onTurnEnd?.(result);
       } catch (err) {
         addLines([["error", `loop failed: ${errorText(err)}`]]);
         setStatus("error — type a message and press Enter to retry");
       } finally {
+        streamTextRef.current = "";
+        streamRowRef.current = null;
+        streamCountRef.current = 0;
         setBusy(false);
       }
     },
-    [messages, busy, addLines, props],
+    [messages, busy, addLines, props, appendDelta, startToolCard, finishToolCard],
   );
 
   // --- rewind ---------------------------------------------------------------
@@ -525,9 +832,124 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
     return { turn: Math.max(...turns) - 1 };
   }, [sessionForRewind]);
 
+  /**
+   * A slash command, handled entirely inside jaa.
+   *
+   * Returns true when the line was a command, so the caller knows not to send it
+   * to the model. An unknown `/foo` is a command *attempt* and is reported as
+   * such rather than forwarded: a leading slash is a clear statement of intent,
+   * and quietly spending a model call on a typo is the worst outcome here.
+   */
+  const runCommand = useCallback(
+    (line: string): boolean => {
+      if (!isCommand(line)) return false;
+      const parsed = parseCommand(line);
+      if (parsed === undefined) return false;
+
+      if (!isKnownCommand(parsed.name)) {
+        const known = COMMANDS.map((c) => c.name).join(" ");
+        setNotice(`unknown command ${parsed.name}. try: ${known}`);
+        return true;
+      }
+      setNotice(undefined);
+
+      switch (parsed.name) {
+        case "/help":
+          addLines([["notice", helpText()]]);
+          return true;
+        case "/rewind":
+          openPicker();
+          return true;
+        case "/model":
+          addLines([["notice", `answering with ${props.model.provider}/${props.model.model}`]]);
+          return true;
+        case "/tokens":
+          addLines([
+            [
+              "notice",
+              `${formatTokens(usage.inputTokens)} in / ${formatTokens(usage.outputTokens)} out over ${turns} turn(s)`,
+            ],
+          ]);
+          return true;
+        case "/sessions":
+          addLines([["notice", props.sessionId ?? "no session id — start with --save to keep one"]]);
+          return true;
+        case "/clear":
+          // Keep the conversation, drop the rows. A `Static` list has already
+          // painted, so this genuinely cannot scroll them away; what it does is
+          // stop the transcript growing, and the next row starts clean.
+          setLines([]);
+          setLive([]);
+          idRef.current = 0;
+          streamRowRef.current = null;
+          streamCountRef.current = 0;
+          runningToolRef.current = null;
+          setNotice("screen cleared — the conversation is unchanged");
+          return true;
+        case "/new":
+          setLines([]);
+          setLive([]);
+          idRef.current = 0;
+          streamRowRef.current = null;
+          streamCountRef.current = 0;
+          runningToolRef.current = null;
+          setMessages([{ role: "system", content: props.systemPrompt }]);
+          setTurns(0);
+          setUsage({ inputTokens: 0, outputTokens: 0 });
+          setNotice("started a fresh conversation");
+          return true;
+        case "/exit":
+          setNotice("use Ctrl+D or Ctrl+C twice to quit");
+          return true;
+        default:
+          // Unreachable: `isKnownCommand` gated the switch. Present so a new
+          // command cannot fall through as a silent no-op.
+          setNotice(`${parsed.name} is not wired up yet`);
+          return true;
+      }
+    },
+    [addLines, openPicker, props.model, props.sessionId, props.systemPrompt, usage, turns],
+  );
+
   // One input handler for every mode. A second `useInput` would race this one
   // for the same keypress.
-  useInput((raw, key) => {
+  //
+  // `isActive` is what stops Ink from mounting a raw-mode handler on a host that
+  // has none. Without it, rendering into a pipe or a harness throws from inside
+  // Ink's own effect — a stack trace printed over the operator's prompt, with no
+  // indication of what to do about it.
+  useInput(
+    (raw, key) => {
+    if (key.ctrl && raw === "c") {
+      // Ctrl+C twice, so a stray interrupt during a long turn does not throw
+      // away a conversation. The first press says so rather than doing nothing
+      // silently, which would leave the operator unsure whether it registered.
+      if (quitArmed) {
+        exit();
+        return;
+      }
+      setQuitArmed(true);
+      setNotice("press Ctrl+C again to quit");
+      return;
+    }
+    if (key.ctrl && raw === "d") {
+      exit();
+      return;
+    }
+    if (key.ctrl && raw === "r") {
+      // A card is only held back from `Static` once it has been expanded, so the
+      // first press flips the newest card and remembers it; from then on that
+      // same card is the one that collapses.
+      toggleToolCard();
+      return;
+    }
+    if (quitArmed && !key.ctrl) {
+      // Any other key disarms, so the second Ctrl+C has to be deliberate and
+      // adjacent in time to the first.
+      setQuitArmed(false);
+      setNotice(undefined);
+    }
+
     if (confirm !== null) {
       if (raw === "y" || raw === "Y") {
         setConfirm(null);
@@ -586,54 +1008,180 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
       return;
     }
 
+    if (key.upArrow) {
+      const moved = walkHistory(history, historyIndex, draft, "older");
+      setInput(moved.text);
+      setCaret(moved.text.length);
+      setHistoryIndex(moved.index);
+      return;
+    }
+    if (key.downArrow) {
+      const moved = walkHistory(history, historyIndex, draft, "newer");
+      setInput(moved.text);
+      setCaret(moved.text.length);
+      setHistoryIndex(moved.index);
+      return;
+    }
+
+    if (key.ctrl && raw === "w") {
+      const next = deleteWordBack(input, caret);
+      setInput(next.text);
+      setCaret(next.caret);
+      return;
+    }
+    if (key.ctrl && raw === "u") {
+      const next = deleteToStart(input, caret);
+      setInput(next.text);
+      setCaret(next.caret);
+      return;
+    }
+
     if (key.return) {
       const line = input.trim();
-      // `/rewind` is handled here rather than by the model, so it never reaches
+      setDraft(input);
+      // Commands are handled here rather than by the model, so they never reach
       // a provider. Every other line is a prompt, exactly as before.
-      if (line === "/rewind") {
+      if (runCommand(line)) {
         setInput("");
-        openPicker();
+        setCaret(0);
         return;
       }
       void submit(input);
       return;
     }
-    if (key.backspace || key.delete) {
-      setInput((prev) => prev.slice(0, -1));
+    if (key.leftArrow) {
+      setCaret((c) => Math.max(0, c - 1));
       return;
     }
-    setInput((prev) => prev + raw);
-  });
+    if (key.rightArrow) {
+      setCaret((c) => Math.min(input.length, c + 1));
+      return;
+    }
+    if (key.backspace || key.delete) {
+      if (key.delete) {
+        setInput((prev) => (caret < prev.length ? prev.slice(0, caret) + prev.slice(caret + 1) : prev));
+        return;
+      }
+      if (caret <= 0) return;
+      setInput((prev) => prev.slice(0, caret - 1) + prev.slice(caret));
+      setCaret((c) => Math.max(0, c - 1));
+      return;
+    }
+    if (raw === "") return;
+    setInput((prev) => prev.slice(0, caret) + raw + prev.slice(caret));
+    setCaret((c) => c + raw.length);
+    },
+    { isActive: interactive },
+  );
 
   const panelOpen = picker !== null || confirm !== null;
+  const palette = panelOpen ? [] : matchingCommands(parseCommand(input)?.name ?? "");
+
+  /**
+   * The input line, split around the caret so a cursor anywhere in the text
+   * draws in the right place.
+   *
+   * Ink has no cursor primitive, so the block is always drawn at the caret and
+   * the line is assembled around it. When the line is longer than the terminal
+   * is wide, a line scrolled past the right edge would push the block off
+   * screen, so the window follows the caret.
+   */
+  const { before, highlighted, after } = useMemo(() => {
+    const at = Math.min(caret, input.length);
+    const raw = input.slice(at) + (busy ? "" : "█");
+    if (busy) return { before: input.slice(0, at), highlighted: "", after: raw };
+    return { before: input.slice(0, at), highlighted: "█", after: input.slice(at) };
+  }, [input, caret, busy]);
+
+  /**
+   * Tokens currently in the prompt, for the gauge.
+   *
+   * Estimated from the transcript rather than taken from the last turn's
+   * `input_tokens`, because the gauge is about the next request: after a
+   * compaction or a trim the number the model last saw is not the number about
+   * to be sent, and the gauge is the thing that warns before trimming bites.
+   */
+  const contextTokens = useMemo(
+    () => messages.reduce((total, message) => total + estimateMessageTokens(message), 0),
+    [messages, ticks],
+  );
 
   return (
     <Box flexDirection="column">
-      <Static items={lines}>
-        {(line) => {
-          const color = colorFor(line.kind);
-          return (
-            <Text key={line.id} {...(color ? { color } : {})}>
-              {prefixFor(line.kind)}
-              {line.text}
-              {line.meta ? " " : ""}
-              {line.meta ? <Text dimColor>{line.meta}</Text> : null}
-            </Text>
-          );
-        }}
+      <StatusBar
+        provider={props.model.provider}
+        model={props.model.model}
+        inputTokens={usage.inputTokens}
+        outputTokens={usage.outputTokens}
+        budget={props.tokenBudget ?? 32_000}
+        contextTokens={contextTokens}
+        turns={turns}
+        elapsedMs={elapsed}
+        busy={busy}
+        {...(props.sessionId !== undefined ? { sessionId: props.sessionId } : {})}
+        {...(notice !== undefined ? { notice } : {})}
+      />
+      {/*
+        A card the operator has expanded stays out of `Static`.
+
+        `Static` writes a row once and never repaints it, so a card handed to it
+        cannot be collapsed again — Ctrl+R would change state that the terminal
+        no longer reads. The card is therefore only committed once it is done
+        being looked at, which is what makes the expand/collapse pair work.
+      */}
+      <Static items={lines.filter((line) => line.id !== focusedCard)}>
+        {(line) => <LineView key={line.id} line={line} />}
       </Static>
+      {[
+        ...lines.filter((line) => line.id === focusedCard),
+        ...live,
+      ].map((line) => (
+        <LineView key={line.id} line={line} />
+      ))}
       {panelOpen ? null : (
-        <Box marginTop={1}>
-          <Text color={busy ? "yellow" : "green"}>{busy ? "…" : "❯"}</Text>
-          <Text>
-            {busy ? ` ${status}` : ` ${input || status}`}
-            {busy ? "" : <Text dimColor>█</Text>}
-          </Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="column">
+            <Box>
+              <Text color={busy ? "yellow" : "green"}>{busy ? "◐" : "❯"}</Text>
+              <Text>
+                {busy ? " " + status : before}
+                {busy ? "" : highlighted}
+                {busy ? "" : after}
+              </Text>
+            </Box>
+            {/*
+              The last outcome, on its own line under an empty prompt.
+
+              It cannot share the prompt line: a bare caret on an empty input is
+              invisible next to anything, and a status replacing the caret leaves
+              no sign of where to type. Both are needed, so they are stacked.
+            */}
+            {!busy && input === "" && status !== "" ? <Text dimColor>{"  " + summarize(status, 100)}</Text> : null}
+          </Box>
+          {palette.length > 0 && input.startsWith("/") ? (
+            <Box flexDirection="column" marginLeft={2}>
+              {palette.slice(0, 8).map((command) => (
+                <Text key={command.name} dimColor>
+                  {command.name.padEnd(10)}
+                  {command.summary}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
         </Box>
       )}
       {lines.length === 0 && !busy && !panelOpen ? (
-        <Box>
-          <Text dimColor>type a message and press Enter · /rewind to restore a turn · Ctrl+C to quit</Text>
+        <Box marginTop={1} flexDirection="column">
+          {interactive ? (
+            <Text dimColor>Enter send · /help for commands · ↑ history · Esc Esc rewind · Ctrl+C×2 quit</Text>
+          ) : (
+            // Say why nothing can be typed, rather than showing a prompt that
+            // silently ignores every key. Someone piping output in gets this.
+            <>
+              <Text color="yellow">this terminal cannot be typed into — no raw-mode input available</Text>
+              <Text dimColor>use `jaa ask &lt;prompt&gt;` for one-shot output</Text>
+            </>
+          )}
         </Box>
       ) : null}
       {confirm !== null ? <ConfirmPanel state={confirm} /> : null}
@@ -729,10 +1277,42 @@ function ConfirmPanel({ state }: { state: ConfirmState }): React.JSX.Element {
   );
 }
 
-export type StartChatOptions = Omit<ChatAppProps, "resumeMessages"> & { resumeMessages: ChatMessage[] };
+export type StartChatOptions = Omit<ChatAppProps, "resumeMessages"> & {
+  resumeMessages: ChatMessage[];
+  /**
+   * The input stream Ink listens on. Defaults to `process.stdin`; a host that
+   * supplies its own gets the non-fatal path when it cannot do raw mode, instead
+   * of Ink throwing because the stream is not the one it hard-codes.
+   */
+  stdin?: NodeJS.ReadStream;
+};
 
 /** Render the interactive chat and resolve when the user quits. */
+/**
+ * Whether Ink can put this process's stdin into raw mode.
+ *
+ * Read from the stream Ink will actually use, and by the same test Ink applies
+ * internally (`stdin.isTTY`) — Ink 7 throws out of its input handler when that
+ * is false, so this is not a judgement call but a description of what will
+ * happen. Passing our own `stdin` to `render` also switches Ink to the
+ * non-fatal branch of that throw, which is what keeps a piped or captured run
+ * from printing a stack trace over its own output.
+ */
+function rawModeAvailable(stdin: NodeJS.ReadStream = process.stdin): boolean {
+  return stdin.isTTY === true;
+}
+
 export async function startChat(options: StartChatOptions): Promise<void> {
-  const { render } = await import("ink");
-  await render(<ChatApp {...options} />).waitUntilExit();
+  const ink = await import("ink");
+  const stdin = options.stdin ?? process.stdin;
+  const interactive = rawModeAvailable(stdin);
+  const instance = ink.render(
+    <ChatApp
+      {...options}
+      interactive={interactive}
+      onExit={() => instance.unmount()}
+    />,
+    { stdin, exitOnCtrlC: false },
+  );
+  await instance.waitUntilExit();
 }

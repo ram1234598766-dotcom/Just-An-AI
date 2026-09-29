@@ -40,10 +40,55 @@ describe("ChatApp (ink-testing-library)", () => {
       />,
     );
     try {
-      expect(lastFrame()).toContain("type a message and press Enter");
+      // The idle hint now names the keys rather than the old prose, and points
+      // at /help. Asserted as the operator would read it: which keys work, and
+      // how to discover the rest.
+      const idle = lastFrame();
+      expect(idle).toContain("Enter send");
+      expect(idle).toContain("/help");
+      expect(idle).toContain("Ctrl+C");
       stdin.write("hello");
       await delay(50);
       expect(lastFrame()).toContain("hello");
+    } finally {
+      unmount();
+    }
+  });
+
+  it("shows the model, token use and a context gauge before anything is sent", async () => {
+    const { stdin, lastFrame, unmount } = render(
+      <ChatApp
+        model={fakeModel([
+          {
+            message: { role: "assistant", content: "hi" },
+            usage: { inputTokens: 4, outputTokens: 2 },
+            model: "fake-model",
+            provider: "test",
+          },
+        ])}
+        systemPrompt="you are jaa"
+        executeTool={async () => "ok"}
+        resumeMessages={[]}
+        tokenBudget={200}
+      />,
+    );
+    try {
+      const idle = lastFrame();
+      expect(idle).toContain("test/fake-model");
+      expect(idle).toContain("turn 0");
+      // The gauge is present from the first frame, not only after a turn, so a
+      // long system prompt is visible before anything is spent.
+      expect(idle).toContain("ctx");
+      expect(idle).toMatch(/[█░]{5,}/);
+      expect(idle).toContain("tok");
+
+      stdin.write("hello");
+      await delay(50);
+      stdin.write("\r");
+      await delay(80);
+      const after = lastFrame();
+      expect(after).toContain("turn 1");
+      expect(after).toMatch(/tok \d+in\/\d+out/);
     } finally {
       unmount();
     }
@@ -84,10 +129,18 @@ describe("ChatApp (ink-testing-library)", () => {
       await delay(80);
       const frame = lastFrame();
       expect(frame).toContain("❯ list files");
-      expect(frame).toContain('→ bash({"command":"ls"})');
-      expect(frame).toContain("↳ ls succeeded (ok)");
+      // A tool is now a card, not a `→ name(args)` line followed by a `↳` line.
+      // The assertions are on the parts a reader actually uses: the name, the
+      // arguments, the verdict, the duration, and the result text.
+      expect(frame).toContain("bash");
+      expect(frame).toContain('{"command":"ls"}');
+      expect(frame).toContain("✓");
+      expect(frame).toContain("ls succeeded");
+      expect(frame).toMatch(/\d+ms/);
       expect(frame).toContain("done");
       expect(frame).toContain("completed · 2 turn(s) · 16 in / 7 out");
+      // The card replaces the old prefix, so its absence is asserted too.
+      expect(frame).not.toContain("↳");
     } finally {
       unmount();
     }
