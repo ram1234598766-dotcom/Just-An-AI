@@ -1,4 +1,46 @@
 /**
+ * Wrap a tool executor so a mutating call's diagnostics land on its result.
+ *
+ * Extracted from the CLI so that both `ask` and `chat` get it, and so it can be
+ * tested. The wiring used to live inline in the `ask` action, which made the one
+ * property that matters untestable: **does the compiler's verdict reach the saved
+ * session, or only the live turn?**
+ *
+ * It does reach it, and that is the point of the phase. The tool result is part
+ * of `result.messages`, the delta persisted by `ask` is a slice of exactly that
+ * array, and this wrapper's extra text is written into the result the loop
+ * stores. So `jaa session show` replays the compiler's verdict, not the agent's
+ * claim about it — the difference between a transcript that records what was
+ * found and one that records what was asserted.
+ *
+ * The wrapper deliberately does not touch the permission gate: `inner` is already
+ * gated by the caller, so the call passes the engine exactly once and only the
+ * *result* gains text.
+ */
+export function withDiagnostics(
+  inner: (call: ToolCall) => Promise<string>,
+  options: LspLoopOptions & { mutatingTools?: readonly string[] },
+  onReport?: (report: DiagnosticsReport & { path: string }) => void,
+): (call: ToolCall) => Promise<string> {
+  // The permission engine's own list, read rather than copied: a snapshot and a
+  // diagnostics refresh should agree about which calls can change a file.
+  const mutating = options.mutatingTools ?? MUTATING_TOOLS;
+
+  return async (call) => {
+    const result = await inner(call);
+    if (!mutating.includes(call.name)) return result;
+    const path = writtenPath(call);
+    if (path === undefined) return result;
+    const report = await refreshDiagnostics(options, path);
+    onReport?.({ ...report, path });
+    // Empty text is the common case — a clean file after an edit — and appending
+    // "no problems" to every successful write would spend tokens restating what
+    // the absence of an error already says.
+    return report.text === "" ? result : `${result}${report.text}`;
+  };
+}
+
+/**
  * Loop integration: surface a tool call's real diagnostics without the model
  * asking for them.
  *
@@ -20,7 +62,8 @@
  * hooks. The same rule applies here, and for a second reason: inserting a
  * message moves every later message one position along, which is exactly the
  * drift the Phase 14 turn index exists to avoid. So the diagnostics are appended
- * to the result, which keeps the transcript and `turnIndex` intact.
+ * to the result, which keeps the transcript, `turnIndex` and the saved session
+ * all consistent.
  *
  * ## It is best-effort by construction
  *
@@ -31,6 +74,7 @@
  */
 
 import type { LspManager } from "../lsp/manager.js";
+import { MUTATING_TOOLS } from "../permissions/rules.js";
 import type { ToolCall } from "../providers/types.js";
 
 /** How long a post-edit diagnostics refresh may take before it is abandoned. */

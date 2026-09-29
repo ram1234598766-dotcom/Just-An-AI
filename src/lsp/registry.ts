@@ -51,6 +51,17 @@ export interface LspServerConfig {
   /** How to install it, for the error message. Never run automatically. */
   install?: string;
   /**
+   * Binaries this server needs *besides* itself.
+   *
+   * A command being on `PATH` does not mean the server can analyse anything.
+   * `rust-analyzer` is a frontend: with no `cargo` or `rustc` installed it starts,
+   * handshakes, publishes nothing, and reports no error. The first version of
+   * this registry would have called that "available", which is exactly the kind
+   * of claim `jaa doctor` is supposed to prevent. So the toolchain is part of
+   * availability, and its absence is reported as its own reason.
+   */
+  requires?: string[];
+  /**
    * A `tsserver` implementation this server should drive, as a path relative to
    * the project root.
    *
@@ -97,6 +108,9 @@ export const BUILTIN_SERVERS: readonly LspServerConfig[] = [
     extensions: [".py", ".pyi"],
     markers: ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"],
     install: "npm i -g pyright",
+    // `pyright` on PATH is the CLI wrapper; the server is `pyright-langserver`,
+    // and it exits immediately without the `--stdio` flag.
+    requires: [],
   },
   {
     id: "rust",
@@ -104,6 +118,10 @@ export const BUILTIN_SERVERS: readonly LspServerConfig[] = [
     extensions: [".rs"],
     markers: ["Cargo.toml"],
     install: "rustup component add rust-analyzer",
+    // rust-analyzer cannot analyse Rust without the compiler. Verified on a host
+    // where it is installed and `cargo` is not: it starts, handshakes, and
+    // publishes nothing at all, with no error to explain why.
+    requires: ["cargo"],
   },
   {
     id: "go",
@@ -111,6 +129,7 @@ export const BUILTIN_SERVERS: readonly LspServerConfig[] = [
     extensions: [".go"],
     markers: ["go.mod", "go.work"],
     install: "go install golang.org/x/tools/gopls@latest",
+    requires: ["go"],
   },
   {
     id: "cpp",
@@ -203,6 +222,22 @@ export function detectServers(
         evidence,
         available: false,
         reason: `"${config.command}" is not on PATH`,
+      });
+      continue;
+    }
+
+    // A server that needs a toolchain it does not have is not usable, and saying
+    // "available" for one that publishes nothing is the specific lie `doctor`
+    // exists to avoid.
+    const missing = (config.requires ?? []).filter((binary) => findExecutable(binary) === undefined);
+    if (missing.length > 0) {
+      detected.push({
+        config,
+        evidence,
+        available: false,
+        reason:
+          `${config.command} is installed, but it cannot analyse anything without ${missing.join(" and ")}. ` +
+          `It will start and report no problems, which is not the same as reporting no errors.`,
       });
       continue;
     }

@@ -712,24 +712,22 @@ program
     // It rides on the result rather than becoming a message, for the same reason
     // hook context does — a provider requires every tool result to immediately
     // follow its assistant message, and an inserted message would shift every
-    // later position and break the Phase 14 turn index.
+    // later position and break the Phase 14 turn index. Because the result is
+    // part of `result.messages`, the diagnostics are also what `--save` writes and
+    // `jaa session show` replays.
     if (lspManager !== undefined && toolsEnabled) {
-      const { refreshDiagnostics, writtenPath } = await import("../lsp/loop.js");
-      const { MUTATING_TOOLS: mutating } = await import("../permissions/rules.js");
+      const { withDiagnostics } = await import("../lsp/loop.js");
       // `baseExecute` is already the permission-gated executor built above, so
-      // wrapping it does not bypass the gate — the call still goes through the
-      // engine exactly once, and only the *result* gains text.
+      // wrapping it does not bypass the gate: the call passes the engine exactly
+      // once, and only the result gains text.
       const baseExecute = loopOptions.executeTool;
-      loopOptions.executeTool = async (call) => {
-        const result = await baseExecute(call);
-        if (!mutating.includes(call.name)) return result;
-        const path = writtenPath(call);
-        if (path === undefined) return result;
-        const report = await refreshDiagnostics({ manager: lspManager, root: toolContext.root }, path);
-        if (report.text === "") return result;
-        lspDiagnosticNotices.push({ path, count: report.count });
-        return `${result}${report.text}`;
-      };
+      loopOptions.executeTool = withDiagnostics(
+        baseExecute,
+        { manager: lspManager, root: toolContext.root },
+        (report) => {
+          if (report.text !== "") lspDiagnosticNotices.push({ path: report.path, count: report.count });
+        },
+      );
     }
 
     // Phase 16: compaction on the request, never on the saved transcript — see
