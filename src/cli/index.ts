@@ -26,7 +26,9 @@ import { clearMemory, memoryContext, readMemory, remember } from "../agent/memor
 import { appendMessages, createSession, listSessions, loadSession, removeSession, saveSession } from "../agent/session.js";
 import { resolveModel } from "../providers/router.js";
 import type { ToolCall } from "../providers/types.js";
-import { createDefaultRegistry } from "../tools/index.js";
+import { createDefaultRegistry, defaultToolDefinitions } from "../tools/index.js";
+import { createRegistry } from "../tools/registry.js";
+import type { LspManager } from "../lsp/manager.js";
 import type { ToolContext } from "../tools/types.js";
 import { toJsonAskResult } from "./json.js";
 import {
@@ -511,6 +513,7 @@ program
     "run shell commands without OS-level isolation (required on hosts with no sandbox, e.g. Windows without a container)",
   )
   .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
+  .option("--lsp", "use a language server for code intelligence (default: off; starts a process per language)")
   .option("--no-memory", "do not inject this project's durable auto-memory (JAA-MEMORY.md)")
   .option("--no-compact", "do not summarise the context when it grows past the threshold")
   .option("--compact-threshold <n>", "compact at this fraction of the token budget (0.1-1.0, default 0.9)", Number)
@@ -538,6 +541,7 @@ program
     memory?: boolean;
     compact?: boolean;
     compactThreshold?: number;
+    lsp?: boolean;
     compactKeep?: number;
   }) => {
     const promptText = prompt ?? opts.prompt;
@@ -583,7 +587,6 @@ program
       createSession({ provider: model.provider, model: model.model, messages: [...messages] });
 
     const toolsEnabled = opts.tools !== false;
-    const registry = createDefaultRegistry();
     const toolContext: ToolContext = {
       root: process.cwd(),
       cwd: process.cwd(),
@@ -607,6 +610,20 @@ program
         mcpClients.push(client);
       }
     }
+
+    // Phase 17: code intelligence. Off unless `--lsp`. The tools go into the
+    // registry at construction rather than being added to it, so there is one
+    // path by which a tool becomes callable.
+    let lspManager: LspManager | undefined;
+    if (opts.lsp === true) {
+      const { LspManager: Manager } = await import("../lsp/manager.js");
+      lspManager = new Manager({ root: process.cwd() });
+    }
+    const lspToolDefs = lspManager === undefined ? [] : (await import("../tools/lsp.js")).lspTools(() => lspManager);
+    const registry =
+      lspToolDefs.length === 0
+        ? createDefaultRegistry()
+        : createRegistry([...defaultToolDefinitions(), ...lspToolDefs]);
 
     const builtInNames = new Set(registry.list().map((t) => t.name));
     const allTools = toolsEnabled ? [...registry.list(), ...allMcpTools(mcpClients)] : undefined;
@@ -650,6 +667,9 @@ program
     // Phase 16: accumulated here so the summary line can report totals across
     // every firing in the run, not just the last.
     const compactionNotices: CompactionNotice[] = [];
+    // Phase 17: which files a language server reported problems in, so the run
+    // ends with an honest line rather than the model quietly guessing.
+    const lspDiagnosticNotices: Array<{ path: string; count: number }> = [];
     if (allTools && allTools.length > 0) loopOptions.tools = allTools;
     if (opts.maxTurns !== undefined) loopOptions.maxTurns = opts.maxTurns;
     if (opts.tokenBudget !== undefined) loopOptions.tokenBudget = opts.tokenBudget;
@@ -683,6 +703,35 @@ program
     // to. With no mutating tool call, nothing is written.
     loopOptions.checkpoints = { session, ctx: toolContext };
 
+    // Phase 17: after a mutating call, ask the language server what it thinks of
+    // the file and put the answer on the tool result. The model never asks for
+    // this, which is the point: an agent that hallucinates a type error will
+    // "fix" correct code, and the mistake is invisible because it was asserted
+    // confidently.
+    //
+    // It rides on the result rather than becoming a message, for the same reason
+    // hook context does — a provider requires every tool result to immediately
+    // follow its assistant message, and an inserted message would shift every
+    // later position and break the Phase 14 turn index.
+    if (lspManager !== undefined && toolsEnabled) {
+      const { refreshDiagnostics, writtenPath } = await import("../lsp/loop.js");
+      const { MUTATING_TOOLS: mutating } = await import("../permissions/rules.js");
+      // `baseExecute` is already the permission-gated executor built above, so
+      // wrapping it does not bypass the gate — the call still goes through the
+      // engine exactly once, and only the *result* gains text.
+      const baseExecute = loopOptions.executeTool;
+      loopOptions.executeTool = async (call) => {
+        const result = await baseExecute(call);
+        if (!mutating.includes(call.name)) return result;
+        const path = writtenPath(call);
+        if (path === undefined) return result;
+        const report = await refreshDiagnostics({ manager: lspManager, root: toolContext.root }, path);
+        if (report.text === "") return result;
+        lspDiagnosticNotices.push({ path, count: report.count });
+        return `${result}${report.text}`;
+      };
+    }
+
     // Phase 16: compaction on the request, never on the saved transcript — see
     // `compact.ts` for why rewriting `history` would invalidate every Phase 14
     // checkpoint position. Omitted when off, which leaves the pre-Phase-16 path
@@ -708,6 +757,13 @@ program
     // Disconnect MCP servers
     for (const client of mcpClients) {
       await client.disconnect().catch(() => {});
+    }
+    // Phase 17: stop every language server before this process exits. A
+    // `typescript-language-server` left running holds a whole project in memory,
+    // and there is one per language, so skipping this is the difference between
+    // exiting promptly and leaving a machine hot.
+    if (lspManager !== undefined) {
+      await lspManager.close().catch(() => {});
     }
 
     const delta = result.messages.slice(resumed ? resumed.messages.length : messages.length);
@@ -739,7 +795,11 @@ program
 
     console.error(
       `[${result.stopReason}] ${result.turns} turn(s) · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out` +
-        (persisted ? ` · session ${session.id}` : ""),
+        (persisted ? ` · session ${session.id}` : "") +
+        (lspDiagnosticNotices.length > 0
+          ? ` · lsp: ${lspDiagnosticNotices.reduce((n, d) => n + d.count, 0)} problem(s) in ` +
+            `${new Set(lspDiagnosticNotices.map((d) => d.path)).size} file(s)`
+          : ""),
     );
   });
 
@@ -1304,7 +1364,27 @@ mcp
 // --- lsp ------------------------------------------------------------------
 const lsp = program
   .command("lsp")
-  .description("LSP (Language Server Protocol) utilities");
+  .description("language servers: what this project would use, and whether it is usable");
+
+lsp
+  .command("list")
+  .description("show which language servers apply to this project")
+  .option("--json", "emit the raw detection records")
+  .action(async (opts: { json?: boolean }) => {
+    const { detectServers, describeDetection } = await import("../lsp/registry.js");
+    const detected = detectServers(process.cwd());
+    if (opts.json === true) {
+      console.log(JSON.stringify(detected, null, 2));
+      return;
+    }
+    if (detected.length === 0) {
+      console.log("no language applies to this project — no server would be started");
+      return;
+    }
+    for (const line of describeDetection(detected)) console.log(line);
+    const usable = detected.filter((d) => d.available);
+    console.log(`\n${usable.length} of ${detected.length} usable. Start jaa with --lsp to use them.`);
+  });
 
 lsp
   .command("diagnose")

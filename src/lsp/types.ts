@@ -49,6 +49,18 @@ export interface LspInitializeParams {
   processId: number | null;
   clientInfo: { name: string; version?: string };
   capabilities: Record<string, unknown>;
+  /**
+   * The project root as a `file://` URI.
+   *
+   * Not optional in practice. A server with no root does not load a
+   * `tsconfig.json`, so it has no project for a file to belong to, and produces
+   * no diagnostics for it — a handshake that succeeds and a server that stays
+   * silent. `workspaceFolders` is sent alongside it because servers differ in
+   * which of the two they read.
+   */
+  rootUri?: string;
+  workspaceFolders?: Array<{ uri: string; name: string }>;
+  initializationOptions?: Record<string, unknown>;
 }
 
 export interface LspServerCapabilities {
@@ -57,4 +69,20 @@ export interface LspServerCapabilities {
     workDoneToken?: boolean;
   };
   textDocumentSync?: number | Record<string, unknown>;
+  /** Phase 17: the navigation and hover features, when a server has them. */
+  definitionProvider?: boolean | Record<string, unknown>;
+  referencesProvider?: boolean | Record<string, unknown>;
+  hoverProvider?: boolean | Record<string, unknown>;
+  documentSymbolProvider?: boolean | Record<string, unknown>;
+  workspaceSymbolProvider?: boolean | Record<string, unknown>;
+}
+
+/** Phase 17: an LSP `SymbolInformation`/`DocumentSymbol`, kept loose. */
+export interface LspSymbol {
+  name: string;
+  kind?: number;
+  detail?: string;
+  /** 1-based, as the protocol states. Kept 1-based so it is printable as-is. */
+  line?: number;
+  containerName?: string;
 }

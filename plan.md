@@ -50,7 +50,7 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | Worktree isolation | yes | yes | -- | -- | **yes** |
 | Checkpoint / rewind | yes (Esc Esc) | fork + worktree | -- | snapshots | **no** |
 | Compaction | summarize ~95% | model-native | plugin | summarize ~90% | **yes** (summarize, pinned, observable) |
-| Live LSP in the loop | yes | via MCP | -- | 30+ auto | **partial** (manual) |
+| Live LSP in the loop | yes | via MCP | -- | 30+ auto | **yes** (session-per-language, worktree-safe) -- ties |
 | Plugin packaging | marketplaces | 90+ plugins | everything-is-plugin | plugin array | **no** |
 | Code Mode (TS orchestrator) | -- | -- | yes | -- | **no** |
 | Cross-harness config read | CLAUDE.md | AGENTS.md | AGENTS.md | AGENTS.md | AGENTS.md only |
@@ -85,7 +85,7 @@ are closed; the remainder is what still stands between jaa and the bar.
 | 5 | No rewind | 14 | **closed** — checkpoint, rewind, fork, 3 known limits |
 | 6 | TUI is shallow — no multi-pane, no agent dashboard, no typed tool cards, no themes or keybinds | 20 | **open** — the most visible surface is the least developed, and it is last so it can render everything above it |
 | 7 | No plugin packaging — skills and subagents cannot be bundled as one installable unit with hooks and MCP servers | 19 | **open** |
-| 8 | LSP is manual — `jaa lsp diagnose` is a one-shot command | 17 | **open** — competitors feed diagnostics into the loop after every edit |
+| 8 | LSP is manual — `jaa lsp diagnose` is a one-shot command | 17 | **closed** — long-lived session per language, auto-injected after a mutating call, 4 verified defects |
 
 The order of the original ranking is preserved deliberately: 6-8 were ranked
 below the trust and team blockers on purpose, and re-sorting them now that the
@@ -112,7 +112,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 14 | Checkpoint, rewind and fork | `e9a81ab` | **done** (3 known limits) |
 | 15 | Multi-agent orchestration (parallel + worktrees + background) | `62adbe8` | **done** (3 known limits) |
 | 16 | Compaction and persistent memory | `5c825eb` | **done** (2 known limits) |
-| 17 | Live code intelligence (LSP in the loop) | - | planned |
+| 17 | Live code intelligence (LSP in the loop) | - | **done** (2 known limits) |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
 | 20 | TUI overhaul (multi-pane, tool cards, dashboard) | - | planned |
@@ -192,6 +192,52 @@ activity, and permission prompts that only exist by Phase 19.
     handle, so stop cannot be a signal. It is cooperative and observable —
     `requestStop` marks the board, the child polls, `isStale` reports a worker
     that stopped making progress. Recorded as limit L3.
+- **2026-09-29 - Phase 17: language servers are launched by unwrapping the npm
+  shim, never through a shell.** The obvious fix for "Windows cannot spawn an
+  npm-installed language server" is `cmd.exe /d /s /c`, and it is wrong. Measured
+  on this host with every argument double-quoted: `&`, `|` and `>` still break
+  out of the line, and `%PATH%` **expanded to the real value**. A project
+  directory is a path a user typed and may contain any of those, so routing it
+  through a shell would mean jaa executes a command the path chose - in a
+  codebase whose whole permission story is "do not run a shell where an argv
+  suffices". `resolveSpawn` therefore reads the standard npm shim, finds the
+  script it would have run, and spawns `process.execPath` against it. `/s` is also
+  rejected outright: it breaks every quoted form, including the safe ones.
+  - *It refuses rather than falls back.* An unresolvable command, or a batch file
+    that is not a recognised npm shim, throws with a message naming the file. A
+    shim is a file inside a global install directory, not one jaa controls, so
+    guessing what it would execute is not a trade worth making.
+- **2026-09-29 - Phase 17: `typescript-language-server` is push-only, and it
+  gates that on a capability the LSP specification does not define.** Read out of
+  the server's own bundled source: eatures.diagnosticsSupport =
+  Boolean(capabilities.textDocument.publishDiagnostics)`, and
+  `FileDiagnostics.publishDiagnostics()` returns early when the flag is false. A
+  client that omits the key gets a server that handshakes correctly, answers
+  `textDocument/diagnostic` with "Unhandled method", and never sends a single
+  diagnostic - with no error anywhere. Three further defects hid behind that
+  one: notifications were read from `result` rather than `params`; the server
+  publishes a URL-encoded, lowercased URI that never matches the one sent; and
+  `initialize` omitted `rootUri`, so no `tsconfig.json` was loaded and no file
+  belonged to a project. **None of the four is visible to a unit test with a
+  stubbed server**, which is why the phase ships a test that runs against the
+  real one and asserts both that a real error is reported and that a clean file
+  reports nothing.
+- **2026-09-29 - Phase 17: TypeScript 7 removed `tsserver`, so the language
+  server and the type compiler are resolved separately.** `typescript@7` is the
+  native Go port and ships only `tsc`. A project on it therefore has nothing for
+  `typescript-language-server` to drive, and the server fails at `initialize`
+  with "Could not find a valid TypeScript installation". So the registry resolves
+  the server's command *and* a `tsserver` and reports the two failures as two
+  different facts with two different fixes, and the repository carries an aliased
+  `typescript5@npm:typescript@5.9.3` purely to have something to drive. The
+  project's own 	ypescript@^7.0.2 gate is untouched: aliased, dev-only, and
+  never on the build path.
+- **2026-09-29 - Phase 17: injected diagnostics ride on the tool result, not on
+  a message.** A provider requires every tool result to immediately follow the
+  assistant message that proposed the call, and an inserted message moves every
+  later position along - which is exactly the drift the Phase 14 turn index
+  exists to prevent. Same reasoning as `appendHookContext`, and the same
+  constraint, so the two features agree by construction.
 - **2026-09-29 - Phase 16: compaction runs on the request, never on the loop's
   `history`, because Phase 14 checkpoints are tagged by message position.**
   `runAgentLoop` returns the full untrimmed transcript and every Phase 14
@@ -439,6 +485,11 @@ activity, and permission prompts that only exist by Phase 19.
 | 2026-09-29 | `npm run lint` (Phase 16 first pass) | errors fixed in new code: duplicate `ToolCall` import in the CLI, `unfinishedTasks` imported from the wrong module, missing `AgentLoopCompactionOptions` / `CompactionNotice` imports in the TUI, an unbalanced brace in `app.tsx` after the prefix edit, and a nested-backtick template literal in the test. **A silent corruption was also caught here:** editing `prefixFor` in `app.tsx` replaced the Unicode prefixes `❯`, `→` and `↳` with literal ASCII `?`. The diff is now clean for those lines and the assertion is back |
 | 2026-09-29 | `npm run lint` + `CI=1 npm test` + `npm run build` + `npm audit --audit-level=high` | ok — **900/900 tests across 30 files** (+49 new, 0 regressions from 851/851 across 29), `npm run lint` 0 errors, `npm run build` 0, `npm audit --audit-level=high` **0 vulnerabilities**, `npm run check:secrets` clean (184 files). Smoke: `jaa memory list/add/clear` all correct, `clear` refuses without `--yes` and exits 1, and a note appended outside the markers is treated as operator prose and left alone. **Phase 16 gate, both assertions:** a session driven past the threshold keeps the system prompt, the project memory, a pinned mid-transcript message and the recent tail, and the token count drops (asserted end-to-end through `runAgentLoop`, not just the function); auto-memory survives a "restart" because it is a file, re-read with no in-process state |
 | 2026-09-29 | three bugs found by the Phase 16 tests, not by review | (1) the memory renderer emitted `MEMORY_END` **before** the entries, so the managed block was empty and every note was silently stranded in the prose — `readMemory` returned `[]` for a file that plainly contained notes; (2) the loop called `compactIfNeeded` on an **already-trimmed** request, and because it refuses when trimming would drop nothing, every compaction was a silent no-op in the real loop while passing in isolation; (3) the size cap measured the entries only, so a file with a hand-written preamble could stay over the limit while evicting every note. All three now have named regression tests |
+| 2026-09-29 | `npm run lint` (Phase 17 first pass) | errors fixed in new code: `createRequire` missing (a bare `require` in an ESM module threw a `ReferenceError` that a `catch {}` swallowed, so `resolveTsserver` silently returned `undefined` and the server was reported uninstalled); swapped `resolveTsserver` arguments; unused imports; a `NavigationSession`/`LspClient` type mismatch. **A file was also corrupted mid-edit** by a PowerShell `List[string].InsertRange` failure that removed ~120 lines of `client.ts` and spliced two methods together — repaired by reconstructing the block, and the existing `tests/lsp.test.ts` confirmed the repair |
+| 2026-09-29 | `npm run lint` + `CI=1 npm test` + `npm run build` + `npm audit --audit-level=high` | ok — **931/931 tests across 31 files** (+31 new, 0 regressions from 900/900 across 30), `npm run lint` 0, `npm run build` 0, `npm audit --audit-level=high` **0 vulnerabilities**, `npm run check:secrets` clean (188 files). **20 tests failed on the first full run** and all 20 had one cause: `--lsp` had been inserted into `ask`'s option list twice, so Commander threw on *every* command at startup ("conflicting flag '--lsp'"), which is why `key set`, `hooks list` and `doctor` all failed at once. Removing the duplicate fixed all 20. Smoke: `jaa lsp list` reports both servers and their tsserver, `lsp list --json` emits the records, `ask --help` shows `--lsp`, `doctor` adds an `lsp` check |
+| 2026-09-29 | four defects found only by driving the real `typescript-language-server` | (1) `spawn` of an npm shim is `ENOENT`/`EINVAL` on Windows, so Phase 8's `lsp diagnose` could never have worked here; (2) the server gates all publishing on a client capability the LSP spec does not define (`textDocument.publishDiagnostics`), read out of its bundled source — omitting it yields a silent server; (3) notifications were read from `result` instead of `params`; (4) the server publishes `file:///c%3A/…` against a client that sent `file:///C:/…`, so every publish landed under an unreachable key. Verified fixed by a real end-to-end run: a file with `const wrong: number = "not a number"` reports `Type 'string' is not assignable to type 'number'` at 3:14 and `5:3`, and a clean control file reports 0 |
+| 2026-09-29 | `npm i -D @ast-grep/napi` then `npm uninstall @ast-grep/napi` | **net zero, deliberately.** Installed and verified working (parses this repository and extracts `runAgentLoop`, `drive`, `createHookWiring` … structurally, so tree-sitter is genuinely available here). Then concluded the language server already provides definition, references, hover and symbols *semantically*, and that detection-by-parsing needed only extension scanning plus a project marker. An unused native module in a package that must install with no toolchain is a net negative, so it was removed. Recorded as limit L7 — "we tried the obvious tool and it was redundant" is a result |
+| 2026-09-29 | `npm i -D typescript5@npm:typescript@5.9.3` | ok — resolved 5.9.3, ships `lib/tsserver.js`, `npm run lint` and `npm run build` unchanged. The project's own `typescript@^7.0.2` is untouched: aliased, dev-only, never on the build path. **Runtime `dependencies` unchanged**, so there is no bundle delta beyond the new source |
 
 ## Phase log
 
@@ -1181,32 +1232,106 @@ competitors feed real diagnostics into the loop.
 **Competitor parity:** opencode ships 30+ auto-installing LSP configurations and
 queries the server after every edit, feeding results into model context.
 
-- [ ] `src/lsp/registry.ts` - built-in server configs for TypeScript, Python,
-      Rust, Go, Java, C/C++, and the rest, auto-detected from the project and
-      auto-started on demand. Import opencode's `lsp` config shape
-- [ ] `src/lsp/session.ts` - one long-lived client per server instead of a
-      process per invocation; reuse the Phase 8 framing and handshake
-- [ ] `src/lsp/workspace.ts` - `didOpen` / `didChange` / `didSave` lifecycle so
-      the server actually knows the buffer state
-- [ ] `src/lsp/features.ts` - diagnostics (on change and on demand),
-      definition, references, hover, document symbols, workspace symbols
-- [ ] `src/agent/loop.ts` - after a mutating tool call, publish fresh
-      diagnostics for touched files into the next turn as a system message, so
-      the model sees real compiler errors instead of hallucinating them
-- [ ] `src/tools/lsp.ts` - expose the feature set to the agent as tools
-      (`lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`)
-- [ ] Graceful degradation: no server for the language means no diagnostics
-      and no error, reported in `jaa doctor`
-- [ ] `tests/lsp-loop.test.ts` - lifecycle, diagnostics injection after edit,
-      server crash and restart, timeout, and absence handling
+- [x] `src/utils/spawn.ts` - **Phase 17 had no client without this.** On Windows
+      `spawn("typescript-language-server")` is `ENOENT` and spawning the `.cmd`
+      is `EINVAL`, because npm installs a shim and Node will not run a batch file
+      without a shell. Measured, and `cmd /c` is the wrong answer: with each
+      argument quoted, `&`, `|` and `>` still break out, and `%PATH%` **expands**.
+      So this locates the shim, reads the standard npm format out of it, and
+      spawns `process.execPath` with the script — no shell, and every argument
+      stays an argv element
+- [x] `src/lsp/registry.ts` - 6 built-in servers (TypeScript, Python, Rust, Go,
+      C/C++, Java) as data, in opencode's `lsp` config shape. Detection is by
+      project marker *or* extension, and a server is only offered when the project
+      actually contains that language — `pyright` being on PATH does not make a
+      TypeScript repo a Python one. `node_modules`, `target`, `.venv` and friends
+      are skipped, and the walk is bounded
+- [x] `src/lsp/client.ts` - Phase 8's one-shot client made long-lived. Document
+      sync (`didOpen`/`didChange`/`didSave`), definition, references, hover,
+      document and workspace symbols, a configurable per-request timeout, and
+      server→client requests answered with `MethodNotFound` rather than ignored
+      (a server waiting on a reply is a server that hangs)
+- [x] **Both diagnostic models.** `typescript-language-server` answers
+      `textDocument/diagnostic` with "Unhandled method" — it is push-only — so a
+      client that only spoke pull produced an error and nothing else. Pull is used
+      when a server advertises `diagnosticProvider`; otherwise a bounded wait on
+      `textDocument/publishDiagnostics`
+- [x] `src/lsp/manager.ts` - one session per (project, language), started on
+      demand. A crashed server is restarted **once** and then disabled for the
+      session, because a server that dies again after a clean restart is
+      misconfigured and retrying it per turn costs a process launch per turn
+- [x] `src/lsp/loop.ts` - after a mutating tool call, ask the server what it
+      thinks of the file and append the answer to the tool result. The model never
+      asks. Bounded, and every failure path is silent: a broken type checker must
+      not fail a write that already succeeded
+- [x] `src/tools/lsp.ts` - `lsp_diagnostics`, `lsp_definition`,
+      `lsp_references`, `lsp_hover`. Results are rendered as workspace-relative
+      `path:line` rather than `file:///…`, which is the form both the model and a
+      human can use
+- [x] `src/cli/index.ts` - `--lsp` on `ask` (off by default), `jaa lsp list`;
+      servers are shut down at the end of a run
+- [x] `src/doctor.ts` - an `lsp` check that separates "no language here" from
+      "server installed but this project is not that language" from "server
+      installed but has nothing to drive"
+- [x] `tests/lsp-loop.test.ts` - 31 tests, including one that runs against the
+      **real** `typescript-language-server` on this repository and asserts both a
+      real type error is reported and a clean file reports nothing. It skips where
+      no server is installed, because a machine without one is a supported
+      configuration
 
-**Gate:** editing a file with a type error surfaces that error to the agent on
-the next turn without the model being asked. A crashing language server is
-restarted once and then ignored, never fatal.
+**Gate result:** lint 0, **931/931 tests across 31 files** (+31, 0
+regressions from 900/900 across 30), build 0, audit 0, `check:secrets` clean
+(188 files). Both gate assertions pass:
 
-**Risk:** language servers are heavy and sometimes hang. Mitigation: startup
-is lazy and per-project, every request is bounded by a timeout, and a wedged
-server is killed and reported rather than allowed to block the loop.
+1. *Editing a file with a type error surfaces it to the agent on the next turn
+   without the model being asked* — wired in `ask`, and the diagnostics ride on
+   the tool result rather than becoming a message (a provider requires a tool
+   result to immediately follow its assistant message, and an inserted message
+   would shift every later position and break the Phase 14 turn index).
+2. *A crashing language server is restarted once and then ignored, never fatal* —
+   asserted with a server that exits immediately, called twice.
+
+**Four real defects were found by running against the real server, none of which
+any unit test would have caught.** Each is a case where the code looked correct:
+
+1. **Nothing could be spawned on Windows at all.** `spawn` of an npm shim is
+   `ENOENT`/`EINVAL`. Phase 8's `lsp diagnose` could therefore never have worked
+   on this platform.
+2. **`textDocument/publishDiagnostics` is gated on a client capability the LSP
+   spec does not define.** Read out of the server's own source
+   (`features.diagnosticsSupport = Boolean(capabilities.textDocument.publishDiagnostics)`,
+   and `FileDiagnostics.publishDiagnostics()` returns early when it is false): a
+   client that omits the key gets a server that handshakes correctly and then
+   never sends a single diagnostic, silently.
+3. **Notifications were read from `result` instead of `params`**, so every push
+   arrived with an undefined payload and was discarded.
+4. **The server publishes a URI jaa never sent.** Client: `file:///C:/…`. Server:
+   `file:///c%3A/…` — lowercased drive, percent-encoded colon, because it
+   round-tripped the URI through a URL parser. Keyed on the raw string, every
+   publish landed under a key no lookup ever asked for.
+
+Plus one platform finding worth recording on its own: **TypeScript 7 ships no
+`tsserver` at all** — the Go port removed it — so `typescript-language-server`
+cannot use a `typescript@7` project. jaa resolves a `tsserver` separately from
+the server's command and reports the two failures separately, and the repository
+carries an aliased `typescript5@npm:typescript@5.9.3` purely to have something to
+drive. The project's own `typescript@^7.0.2` type gate is untouched.
+
+#### Known limits carried out of Phase 17
+
+- [ ] **L6 — Diagnostics are on the request, not on the saved session.** Like
+      Phase 16, the loop compacts and here the loop *diagnoses* without mutating
+      the transcript, so `jaa session show` still shows the agent's claim rather
+      than the compiler's. The TUI shows the injected diagnostics live.
+- [ ] **L7 — `@ast-grep/napi` was installed, verified and removed.** It works
+      (it parses this repository and extracts `runAgentLoop`, `drive`,
+      `createCheckpointRecorder` … structurally), but the language server already
+      provides definition, references, hover and symbols *semantically*, and
+      detection-by-parsing turned out to need extension scanning plus a project
+      marker, which is simpler and has no native dependency. Shipping an unused
+      native module in a package that must install with no toolchain is a net
+      negative, so it is not a dependency. Recorded because "we tried the obvious
+      tool and it was redundant" is a result.
 
 ---
 

@@ -306,6 +306,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
       permissionsCheck(),
       await sandboxCheck(),
       await orchestratorCheck(),
+      await lspCheck(),
       tmpCheck(),
     ],
   };
@@ -341,6 +342,42 @@ async function orchestratorCheck(): Promise<DoctorCheck> {
     status: worktree.available ? "ok" : "warn",
     message: worktree.available ? "multi-agent orchestration ready" : "multi-agent ready, but without worktree isolation",
     detail,
+  };
+}
+
+/**
+ * Report what code intelligence can actually do in this project.
+ *
+ * The distinction that matters is between "this project has no language server"
+ * and "the language server is installed but this project looks like it is not
+ * that language". They need different fixes and a single yes/no would hide both.
+ * A server that needs something jaa could not find — TypeScript 7 ships no
+ * `tsserver` — is reported as its own line for the same reason.
+ */
+async function lspCheck(): Promise<DoctorCheck> {
+  const { detectServers, describeDetection } = await import("./lsp/registry.js");
+  const detected = detectServers(process.cwd());
+  if (detected.length === 0) {
+    return {
+      key: "lsp",
+      status: "ok",
+      message: "no language server needed for this project",
+      detail:
+        "Nothing here looks like TypeScript, Python, Rust, Go, C/C++ or Java, so no server is started. " +
+        "`jaa lsp list` shows the same detection.",
+    };
+  }
+
+  const available = detected.filter((d) => d.available);
+  const lines = describeDetection(detected);
+  return {
+    key: "lsp",
+    status: available.length > 0 ? "ok" : "warn",
+    message:
+      available.length > 0
+        ? `code intelligence available for ${available.map((d) => d.config.id).join(", ")}`
+        : "language servers detected for this project, but none is usable",
+    detail: lines.join(" · "),
   };
 }
 
