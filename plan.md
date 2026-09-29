@@ -49,7 +49,7 @@ third-party integration survey (Calyx, Sep 2026) that pins exact versions.
 | Multi-agent | subagents + teams + workflows | 6 threads, depth, CSV fan-out | subagents + workflows | sessions | **yes** (pool, worktrees, fan-out, background) -- **wins** |
 | Worktree isolation | yes | yes | -- | -- | **yes** |
 | Checkpoint / rewind | yes (Esc Esc) | fork + worktree | -- | snapshots | **no** |
-| Compaction | summarize ~95% | model-native | plugin | summarize ~90% | **partial** (truncate) |
+| Compaction | summarize ~95% | model-native | plugin | summarize ~90% | **yes** (summarize, pinned, observable) |
 | Live LSP in the loop | yes | via MCP | -- | 30+ auto | **partial** (manual) |
 | Plugin packaging | marketplaces | 90+ plugins | everything-is-plugin | plugin array | **no** |
 | Code Mode (TS orchestrator) | -- | -- | yes | -- | **no** |
@@ -111,7 +111,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 13 | Hooks (lifecycle events + blocking decisions) | `e9a81ab` | **done** |
 | 14 | Checkpoint, rewind and fork | `e9a81ab` | **done** (3 known limits) |
 | 15 | Multi-agent orchestration (parallel + worktrees + background) | `62adbe8` | **done** (3 known limits) |
-| 16 | Compaction and persistent memory | - | planned |
+| 16 | Compaction and persistent memory | - | **done** (2 known limits) |
 | 17 | Live code intelligence (LSP in the loop) | - | planned |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
@@ -192,6 +192,55 @@ activity, and permission prompts that only exist by Phase 19.
     handle, so stop cannot be a signal. It is cooperative and observable —
     `requestStop` marks the board, the child polls, `isStale` reports a worker
     that stopped making progress. Recorded as limit L3.
+- **2026-09-29 - Phase 16: compaction runs on the request, never on the loop's
+  `history`, because Phase 14 checkpoints are tagged by message position.**
+  `runAgentLoop` returns the full untrimmed transcript and every Phase 14
+  checkpoint carries the 1-based position of the assistant message that proposed
+  a tool call; `restoreMessagesToTurn` and `forkSession` slice on those
+  positions. Splicing `history` in place would shift every position after the
+  compaction point, so a checkpoint taken before it would resolve to a different
+  message after it -- and `jaa rewind` would restore the wrong content having
+  reported success. So the loop compacts the outgoing request and leaves the
+  saved transcript intact; the on-disk reclaim is a separate, explicit
+  `jaa compact`, behind a confirmation.
+  - *This costs something real and is stated rather than hidden:* the saved
+    session file keeps growing for the life of the conversation. That is the
+    trade for `turnIndex` and the saved file agreeing, which is worth more than
+    the disk.
+  - *The order inside the loop is load-bearing.* Compaction runs on the full
+    `history` **before** `trimToBudget`, because `compactIfNeeded` refuses when
+    trimming would not drop a message -- so an already-trimmed request made every
+    compaction a silent no-op. The first implementation did exactly that, and
+    the test that caught it asserts the provider received a compacted request.
+- **2026-09-29 - Phase 16: auto-memory is a Markdown file in the repository, and
+  it is untrusted on read.** Auto-memory is the one place a model writes something
+  that changes what the model is told next time, so the design answers that with
+  visibility rather than with a sandbox: `JAA-MEMORY.md`, in the project root,
+  checked in, delimited by `<!-- jaa-memory:start -->` / `:end -->` markers,
+  readable with `cat` and editable with any editor. No database, no hidden store.
+  - *The markers exist so a person can write below the notes.* A heading alone
+    cannot express "this part is mine", and without that a `remember` call eats
+    whatever the operator wrote under it.
+  - *It goes through the Phase 15 injection scan on read.* The file is inside a
+    repository, so whoever authored the checkout wrote it. A note that reads like
+    an instruction stays on disk -- where the operator can see what tried to get
+    in, via `jaa memory list --rejected` -- and is withheld from the system
+    prompt. Otherwise "remember this" is a way to plant instructions in every
+    future session.
+  - *The cap evicts oldest-first and is measured against the whole file*, prose
+    and header included. Measuring the entries alone let a file with a long
+    preamble sit permanently over the limit and evict everything while still
+    being over it.
+  - *`remember` is in `MUTATING_TOOLS` but deliberately **not** in
+    `NEVER_IMPLICITLY_ALLOWED`*, so a permission mode can allow it -- the file it
+    writes is a notes document, not code. It declares no `path`, so the Phase 14
+    machinery takes no snapshot: the file is checked in, so `git` restores it.
+- **2026-09-29 - Phase 16: a failed summary falls back to trimming, and says
+  so.** A summariser that throws must not cost the user the conversation, and a
+  summary that comes back *larger* than what it replaced has made the request
+  worse. Both fall back to `trimToBudget` and report a `reason` rather than
+  silently degrading. A compaction that costs a provider call and saves nothing
+  is worse than no compaction, because the user is paying for it either way.
 - **2026-09-28 — Credential scanning is enforced, not just intended.**
   The repo is public, so a secret that reaches a commit reaches everyone who
   clones, and deleting the file afterwards does not remove it from history.
@@ -387,6 +436,9 @@ activity, and permission prompts that only exist by Phase 19.
 | 2026-09-29 | `npm run lint` (Phase 15 first pass) | errors fixed in new code: `exactOptionalPropertyTypes` on the `parseModelField` return, `no-control-regex` written as literal C0 bytes in `inject.ts` (repaired by line replacement), unused `parent` set in `effectiveToolNames`, `task.startedAt = undefined` → `delete` (the board compiles with `exactOptionalPropertyTypes`, so absent and `undefined` differ), duplicate `ToolCall` import, `unfinishedTasks` imported from the wrong module |
 | 2026-09-29 | `npm run lint` + `CI=1 npm test` + `npm run build` + `npm audit --audit-level=high` | ok — **851/851 tests across 29 files** (+94 new, 0 regressions from 757/757 across 28), `npm run lint` 0 errors, `npm run build` 0, `npm audit --audit-level=high` **0 vulnerabilities**. Smoke: `jaa tasks --help` / `list` / `stop` / `attach` all correct, with exit code 1 on a failed or unknown task; `jaa doctor` reports the new `orchestrator` check; `jaa agent run --alongside nope` fails cleanly on an unknown subagent. **Phase 15 gate, all four assertions:** three workers edit one overlapping file with zero conflicts (real git worktrees, interleaved writes, each file holds exactly one writer's content end to end); the depth and thread caps hold under a deliberate fan-out bomb (3 roots × 25 children each, peak concurrency ≤ `maxThreads`); a subagent cannot escalate its own permissions (`effectiveToolNames` is an intersection, proven against a hand-edited `AGENTS.md` asking for `deploy_production` and `disable_sandbox`); injected instructions in a subagent report are neutralized (5 canonical overrides plus whitespace and control-char evasion, with 4 benign security sentences asserted not to fire) |
 | 2026-09-29 | `npm run check:secrets` | ok — `clean (174 tracked file(s) scanned)` |
+| 2026-09-29 | `npm run lint` (Phase 16 first pass) | errors fixed in new code: duplicate `ToolCall` import in the CLI, `unfinishedTasks` imported from the wrong module, missing `AgentLoopCompactionOptions` / `CompactionNotice` imports in the TUI, an unbalanced brace in `app.tsx` after the prefix edit, and a nested-backtick template literal in the test. **A silent corruption was also caught here:** editing `prefixFor` in `app.tsx` replaced the Unicode prefixes `❯`, `→` and `↳` with literal ASCII `?`. The diff is now clean for those lines and the assertion is back |
+| 2026-09-29 | `npm run lint` + `CI=1 npm test` + `npm run build` + `npm audit --audit-level=high` | ok — **900/900 tests across 30 files** (+49 new, 0 regressions from 851/851 across 29), `npm run lint` 0 errors, `npm run build` 0, `npm audit --audit-level=high` **0 vulnerabilities**, `npm run check:secrets` clean (184 files). Smoke: `jaa memory list/add/clear` all correct, `clear` refuses without `--yes` and exits 1, and a note appended outside the markers is treated as operator prose and left alone. **Phase 16 gate, both assertions:** a session driven past the threshold keeps the system prompt, the project memory, a pinned mid-transcript message and the recent tail, and the token count drops (asserted end-to-end through `runAgentLoop`, not just the function); auto-memory survives a "restart" because it is a file, re-read with no in-process state |
+| 2026-09-29 | three bugs found by the Phase 16 tests, not by review | (1) the memory renderer emitted `MEMORY_END` **before** the entries, so the managed block was empty and every note was silently stranded in the prose — `readMemory` returned `[]` for a file that plainly contained notes; (2) the loop called `compactIfNeeded` on an **already-trimmed** request, and because it refuses when trimming would drop nothing, every compaction was a silent no-op in the real loop while passing in isolation; (3) the size cap measured the entries only, so a file with a hand-written preamble could stay over the limit while evicting every note. All three now have named regression tests |
 
 ## Phase log
 
@@ -1058,29 +1110,66 @@ summarize.
 memory from disk afterward so it survives; opencode near 90%; Codex uses
 model-native compaction.
 
-- [ ] `src/agent/compact.ts` - summarization compaction at a configurable
-      threshold (default 90%), using the same provider adapter as the main loop
-      so it works on every provider including local models
-- [ ] Preserved verbatim across compaction: the system prompt, project memory
-      (`AGENTS.md` and friends), pinned skills, and any user message the user
-      marked important. Everything else is replaced by the summary
-- [ ] `src/agent/memory.ts` - auto-memory: durable notes the agent writes and
-      re-reads on the next session, scoped per project, with a size cap and a
-      visible editor (`jaa memory list|edit|clear`) so it is never a hidden
-      black box
-- [ ] Compaction is observable: `jaa ask` reports tokens before and after, and
-      the TUI shows a compaction marker in the transcript
-- [ ] `src/cli/index.ts` - `jaa compact [session] [--focus <text>]`
-- [ ] `tests/compaction.test.ts` - invariants preserved through compaction,
-      budget respected, local-model path, memory persistence and size cap
+- [x] `src/agent/compact.ts` - summarization compaction at a configurable
+      threshold (default 90%), using **the same provider adapter and model as the
+      loop** so it works on every provider including local ones. The summariser
+      is never given tools, and an oversized transcript is summarised in halves
+      and merged rather than sent in one request — which is what every provider
+      with a window smaller than the conversation would refuse
+- [x] Preserved verbatim across compaction: every `system` message (the jaa
+      identity, project memory, preloaded skills), any pinned 1-based message
+      position, and the newest `keepRecent` chunks. Only the unpinned middle is
+      summarised, and a pinned message is not even handed to the summariser, so
+      it cannot be lost to summarisation
+- [x] `src/agent/memory.ts` - auto-memory. `JAA-MEMORY.md` in the project root,
+      delimited by explicit `start`/`end` markers so hand-written prose below the
+      notes survives. 16 kB cap, oldest evicted first, measured against the whole
+      file. **Untrusted on read**: a note that reads like an injection stays on
+      disk and is withheld from the system prompt
+- [x] `src/tools/memory.ts` - the `remember` tool, so the agent can write its own
+      memory. In `MUTATING_TOOLS` (it writes a file) but deliberately **not** in
+      `NEVER_IMPLICITLY_ALLOWED`, so a permission mode can allow it. Declares no
+      `path`, so Phase 14 takes no snapshot — the file is checked in, so `git`
+      restores it
+- [x] Compaction is observable: `jaa ask` prints `[compacted] N → M tokens`, the
+      TUI writes a `~ context compacted` line into the transcript, and the summary
+      itself carries `[compacted]` so the model is told it is reading a record
+- [x] `src/cli/index.ts` - `jaa compact [session] [--focus] [--yes]`;
+      `jaa memory list|add|edit|clear`; `--no-memory`, `--no-compact`,
+      `--compact-threshold`, `--compact-keep` on `ask`
+- [x] `src/agent/loop.ts` - compaction wired **on the request, never on
+      `history`**, and **before** `trimToBudget`. Omitted entirely when not
+      configured, so the pre-Phase-16 path is unchanged
+- [x] `src/agent/budget.ts` - `chunkMessages` exported, so compaction and
+      trimming share one definition of which messages may not be separated
+- [x] `tests/compaction.test.ts` - 49 tests: the summary and its fallbacks, each
+      preserved item individually, the tool-call-pairing invariant across a
+      compaction, pinning, the summariser's no-tools contract, the split-and-merge
+      path, the local-model (no `stream`) path, the loop's turn-index contract, and
+      memory persistence, scoping, the cap, the scan and the tool
 
-**Gate:** a session driven past the compaction threshold still retains the
-system prompt, project memory, and pinned content, and the token count drops.
-Auto-memory survives a process restart.
+**Gate result:** lint 0, **900/900 tests across 30 files** (+49, 0
+regressions), build 0, audit 0. Both gate assertions pass as named tests:
 
-**Risk:** summarization can lose a detail that mattered. Mitigation: the
-preserved list is explicit and tested; the user can pin any turn; compaction
-never fires below the threshold.
+1. *A session past the threshold retains the system prompt, project memory and
+   pinned content, and the token count drops* — asserted end-to-end through
+   `runAgentLoop`, checking the messages the provider actually received rather
+   than the return value of the compaction function alone.
+2. *Auto-memory survives a process restart* — a "restart" is a fresh read with no
+   in-process state carried over, and it is asserted per project so one repo's
+   notes cannot reach another.
+
+#### Known limits carried out of Phase 16
+
+- [ ] **L4 — The saved session file keeps growing.** Compaction bounds the cost
+      of every provider call, which is what breaks, but it deliberately does not
+      rewrite the transcript, because doing so would invalidate Phase 14's
+      checkpoint positions. Reclaiming the space is `jaa compact`, which the
+      operator runs on purpose. A session left alone grows without bound.
+- [ ] **L5 — The memory cap evicts silently to the caller.** The tool result tells
+      the model how many notes were dropped, and `jaa memory add` prints it, but
+      nothing is appended to the file itself. A note evicted between two reads is
+      invisible to anyone who does not happen to run the tool.
 
 ---
 

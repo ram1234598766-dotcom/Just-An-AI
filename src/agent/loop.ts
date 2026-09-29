@@ -38,6 +38,7 @@
  */
 
 import { DEFAULT_TOKEN_BUDGET, trimToBudget } from "./budget.js";
+import { compactIfNeeded } from "./compact.js";
 import { createCheckpointFromTool } from "../checkpoint/create.js";
 import { decideFromHooks } from "../hooks/decide.js";
 import { buildPayload } from "../hooks/run.js";
@@ -170,6 +171,40 @@ export interface AgentLoopOptions {
   hooks?: AgentLoopHookOptions;
   /** Phase 14 checkpoint wiring. Omit it and nothing is snapshotted. */
   checkpoints?: AgentLoopCheckpointOptions;
+  /**
+   * Phase 16 compaction. Omit it and the loop behaves exactly as before,
+   * trimming to budget and dropping what does not fit.
+   *
+   * Compaction runs on the **request**, never on `history`. See the module
+   * comment in `compact.ts`: rewriting `history` in place would shift every
+   * message position after the compaction point, and Phase 14 checkpoints are
+   * tagged with exactly those positions, so a checkpoint taken before a
+   * compaction would resolve to a different message after it. `turnIndex` and
+   * the saved session would then disagree with what actually ran.
+   */
+  compaction?: AgentLoopCompactionOptions;
+  /** Fired when a compaction happened, for the operator-facing line. */
+  onCompaction?: (info: CompactionNotice) => void;
+}
+
+export interface AgentLoopCompactionOptions {
+  /** Fraction of the token budget at which compaction fires. Default 0.9. */
+  threshold?: number;
+  /** Chunks preserved verbatim at the tail. Default 6. */
+  keepRecent?: number;
+  /** 1-based message positions to preserve verbatim. */
+  pinned?: readonly number[];
+  /** Steer the summary. */
+  focus?: string;
+  /** Replaces the summariser. Used by tests. */
+  summarize?: (transcript: string, focus: string | undefined) => Promise<string>;
+}
+
+export interface CompactionNotice {
+  tokensBefore: number;
+  tokensAfter: number;
+  /** Model calls the summary cost. */
+  calls: number;
 }
 
 export type StopReason = "completed" | "max_turns";
@@ -215,10 +250,41 @@ async function drive(
   let outputTokens = 0;
 
   for (let turn = 1; turn <= turns; turn++) {
+    // Phase 16: summarise before trimming, and over the **full history**. A
+    // summary preserves what the conversation was about; a trim preserves only
+    // what happened recently. On a long session that is the difference between
+    // an agent that knows the task and one that has forgotten it.
+    //
+    // The order is load-bearing. `compactIfNeeded` refuses when trimming would
+    // not drop a message, so handing it an already-trimmed request made every
+    // compaction a silent no-op. The trim stays, as the final guarantee that a
+    // request fits the window even with compaction off.
     const request: ChatRequest = {
       model: options.model.model,
       messages: trimToBudget(history, budget),
     };
+    if (options.compaction !== undefined) {
+      const compacted = await compactIfNeeded(
+        history,
+        {
+          ...(options.compaction.threshold !== undefined ? { threshold: options.compaction.threshold } : {}),
+          budget,
+          ...(options.compaction.keepRecent !== undefined ? { keepRecent: options.compaction.keepRecent } : {}),
+          ...(options.compaction.pinned !== undefined ? { pinned: options.compaction.pinned } : {}),
+          ...(options.compaction.focus !== undefined ? { focus: options.compaction.focus } : {}),
+          ...(options.compaction.summarize !== undefined ? { summarize: options.compaction.summarize } : {}),
+        },
+        options.model,
+      );
+    if (compacted.compacted) {
+      request.messages = trimToBudget(compacted.messages, budget);
+      options.onCompaction?.({
+          tokensBefore: compacted.tokensBefore,
+          tokensAfter: compacted.tokensAfter,
+          calls: compacted.calls,
+        });
+      }
+    }
     if (options.tools !== undefined && options.tools.length > 0) request.tools = options.tools;
     if (options.temperature !== undefined) request.temperature = options.temperature;
     if (options.numContext !== undefined) request.numContext = options.numContext;

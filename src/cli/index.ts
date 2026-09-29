@@ -21,6 +21,8 @@ import { maskToken } from "../config/redact.js";
 import { resolveGitHubAuth } from "../github/auth.js";
 import { readStdinIfPiped } from "../utils/cli.js";
 import { DEFAULT_SYSTEM_PROMPT, runAgentLoop } from "../agent/loop.js";
+import type { CompactionNotice } from "../agent/loop.js";
+import { clearMemory, memoryContext, readMemory, remember } from "../agent/memory.js";
 import { appendMessages, createSession, listSessions, loadSession, removeSession, saveSession } from "../agent/session.js";
 import { resolveModel } from "../providers/router.js";
 import type { ToolCall } from "../providers/types.js";
@@ -509,6 +511,10 @@ program
     "run shell commands without OS-level isolation (required on hosts with no sandbox, e.g. Windows without a container)",
   )
   .option("--allow-network", "let sandboxed shell commands reach the network (off by default)")
+  .option("--no-memory", "do not inject this project's durable auto-memory (JAA-MEMORY.md)")
+  .option("--no-compact", "do not summarise the context when it grows past the threshold")
+  .option("--compact-threshold <n>", "compact at this fraction of the token budget (0.1-1.0, default 0.9)", Number)
+  .option("--compact-keep <n>", "messages preserved verbatim at the tail when compacting", parsePositiveInt)
   .action(async (prompt: string | undefined, opts: {
     prompt?: string;
     provider?: string;
@@ -529,9 +535,19 @@ program
     sandbox?: boolean;
     allowNetwork?: boolean;
     trustProjectSettings?: boolean;
+    memory?: boolean;
+    compact?: boolean;
+    compactThreshold?: number;
+    compactKeep?: number;
   }) => {
     const promptText = prompt ?? opts.prompt;
     if (!promptText) throw new Error("provide a prompt: the positional argument or --prompt <text>");
+    if (
+      opts.compactThreshold !== undefined &&
+      (!Number.isFinite(opts.compactThreshold) || opts.compactThreshold < 0.1 || opts.compactThreshold > 1)
+    ) {
+      throw new Error(`--compact-threshold must be between 0.1 and 1.0, got ${opts.compactThreshold}`);
+    }
     const settings = loadSettings();
     const resumed = opts.resume ? loadSession(opts.resume) : undefined;
     if (opts.resume && !resumed) throw new Error(`session "${opts.resume}" not found`);
@@ -545,6 +561,14 @@ program
     const messages = resumed ? [...resumed.messages] : [];
     if (messages.length === 0) {
       let systemPrompt = opts.system ?? DEFAULT_SYSTEM_PROMPT;
+      // Phase 16: durable project notes from previous sessions, below the skills
+      // and above the identity, so the model reads what the project taught it
+      // before it reads what jaa is. `--no-memory` skips the read; nothing else
+      // does, because a memory that only loads sometimes is not memory.
+      if (opts.memory !== false) {
+        const notes = memoryContext(readMemory(process.cwd()));
+        if (notes) systemPrompt = `${systemPrompt}\n\n${notes}`;
+      }
       if (opts.skills !== false) {
         const active = matchSkills(loadSkills(), promptText);
         const ctx = skillContext(active);
@@ -623,6 +647,9 @@ program
       messages,
       executeTool,
     };
+    // Phase 16: accumulated here so the summary line can report totals across
+    // every firing in the run, not just the last.
+    const compactionNotices: CompactionNotice[] = [];
     if (allTools && allTools.length > 0) loopOptions.tools = allTools;
     if (opts.maxTurns !== undefined) loopOptions.maxTurns = opts.maxTurns;
     if (opts.tokenBudget !== undefined) loopOptions.tokenBudget = opts.tokenBudget;
@@ -655,6 +682,26 @@ program
     // id, and `ctx` confines every path to the root the tool calls are confined
     // to. With no mutating tool call, nothing is written.
     loopOptions.checkpoints = { session, ctx: toolContext };
+
+    // Phase 16: compaction on the request, never on the saved transcript — see
+    // `compact.ts` for why rewriting `history` would invalidate every Phase 14
+    // checkpoint position. Omitted when off, which leaves the pre-Phase-16 path
+    // unchanged. `onCompaction` is the observability the plan asks for: a
+    // summarisation is a provider call that costs tokens, and a user watching
+    // their bill should be able to see it happened.
+    if (opts.compact !== false) {
+      loopOptions.compaction = {
+        ...(opts.compactThreshold !== undefined ? { threshold: opts.compactThreshold } : {}),
+        ...(opts.compactKeep !== undefined ? { keepRecent: opts.compactKeep } : {}),
+      };
+      loopOptions.onCompaction = (info) => {
+        compactionNotices.push(info);
+        console.error(
+          `[compacted] context ${info.tokensBefore} → ${info.tokensAfter} tokens ` +
+            `(${info.calls} summarising call${info.calls === 1 ? "" : "s"})`,
+        );
+      };
+    }
 
     const result = await runAgentLoop(loopOptions);
 
@@ -1917,6 +1964,187 @@ program
       process.exitCode = 1;
     }
   });
+
+// --- compact ---------------------------------------------------------------
+program
+  .command("compact")
+  .description("summarise a saved session in place, replacing its early turns with a summary")
+  .argument("[session]", "session id; the most recently updated session when omitted")
+  .option("--focus <text>", "ask the summary to pay particular attention to something")
+  .option("--provider <id>", "provider id for the summarising call")
+  .option("--model <model>", "model id for the summarising call")
+  .option("--json", "emit the result as JSON")
+  .option("--yes", "skip the confirmation")
+  .action(async (sessionId: string | undefined, opts: {
+    focus?: string;
+    provider?: string;
+    model?: string;
+    json?: boolean;
+    yes?: boolean;
+  }) => {
+    const id = sessionId ?? listSessions()[0]?.id;
+    if (id === undefined) throw new Error("no sessions to compact");
+    const session = loadSession(id);
+    if (session === undefined) throw new Error(`session "${id}" not found`);
+
+    const { compactSession } = await import("../agent/compact.js");
+    const { estimateChatTokens } = await import("../agent/budget.js");
+    const modelInput: { provider?: string; model?: string } = {};
+    if (opts.provider !== undefined) modelInput.provider = opts.provider;
+    else if (session.provider !== undefined) modelInput.provider = session.provider;
+    if (opts.model !== undefined) modelInput.model = opts.model;
+    else if (session.model !== undefined) modelInput.model = session.model;
+    const model = resolveModel(modelInput);
+
+    // This rewrites the saved transcript, so the early turns are only in the
+    // summary afterwards. The session's own checkpoints are keyed by message
+    // position and stop addressing the original layout, which is the same
+    // consequence the module documents for the loop — hence the confirmation.
+    if (opts.yes !== true && !opts.json) {
+      await confirmDestructive(
+        `compact session ${id}: ${session.messages.length} messages become a summary, and the early turns are ` +
+          `no longer in the file. Its checkpoints will no longer address the original message positions. Continue?`,
+      );
+    }
+
+    const result = await compactSession(
+      session.messages,
+      { ...(opts.focus !== undefined ? { focus: opts.focus } : {}), keepRecent: 8 },
+      model,
+    );
+
+    if (opts.json === true) {
+      console.log(
+        JSON.stringify(
+          {
+            session: id,
+            compacted: result.compacted,
+            reason: result.reason,
+            tokensBefore: result.tokensBefore,
+            tokensAfter: result.tokensAfter,
+            calls: result.calls,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    if (!result.compacted) {
+      console.log(`session ${id} was not compacted: ${result.reason ?? "no reason recorded"}`);
+      console.log(`${result.tokensBefore} tokens before, ${result.tokensAfter} after`);
+      return;
+    }
+
+    session.messages = result.messages;
+    saveSession(session);
+    console.log(
+      `compacted ${id}: ${estimateChatTokens(result.messages)} tokens ` +
+        `(${result.tokensBefore} → ${result.tokensAfter}, ${result.calls} summarising call${result.calls === 1 ? "" : "s"})`,
+    );
+  });
+
+// --- memory ----------------------------------------------------------------
+const memory = program
+  .command("memory")
+  .description("inspect and edit this project's durable auto-memory (JAA-MEMORY.md)");
+
+memory
+  .command("list")
+  .description("print this project's auto-memory")
+  .option("--path", "print the file path only")
+  .option("--rejected", "include notes withheld from context by the injection scan")
+  .action((opts: { path?: boolean; rejected?: boolean }) => {
+    const file = readMemory(process.cwd());
+    if (opts.path === true) {
+      console.log(file.path);
+      return;
+    }
+    if (file.entries.length === 0) {
+      console.log(`no auto-memory for this project (${file.path})`);
+    } else {
+      console.log(`auto-memory — ${file.path}\n`);
+      for (const entry of file.entries) {
+        console.log(`  ${entry.at === "" ? "(no date)" : entry.at}  ${entry.text}`);
+      }
+    }
+    if (file.prose !== "") {
+      console.log(`\n--- hand-written prose (left alone) ---\n${file.prose}`);
+    }
+    if (file.rejected.length > 0) {
+      if (opts.rejected === true) {
+        console.log(`\n--- withheld from context (${file.rejected.length}) ---`);
+        for (const note of file.rejected) console.log(`  ${note}`);
+      } else {
+        console.log(
+          `\n${file.rejected.length} note(s) are withheld from context because they read like instructions ` +
+            `rather than facts. Show them with \`jaa memory list --rejected\`.`,
+        );
+      }
+    }
+  });
+
+memory
+  .command("add")
+  .description("add notes to this project's auto-memory")
+  .argument("<notes...>", "one or more facts to remember")
+  .action((notes: string[]) => {
+    const result = remember(notes, process.cwd());
+    if (!result.written) {
+      console.error(`jaa: could not write ${result.path} — the checkout may be read-only`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`remembered ${notes.length} note(s) in ${result.path} (${result.kept} kept)`);
+    if (result.dropped > 0) console.log(`${result.dropped} older note(s) were dropped to stay under the cap`);
+  });
+
+memory
+  .command("edit")
+  .description("print the file to edit, or open it in $EDITOR")
+  .option("--print", "print the file instead of opening an editor")
+  .action(async (opts: { print?: boolean }) => {
+    const file = readMemory(process.cwd());
+    if (opts.print === true || !process.env.EDITOR) {
+      // Printing is the primary path: it works on a machine with no editor
+      // configured, in CI, and over a pipe, which is where this is most often
+      // needed. jaa never edits the file itself — the whole point of auto-memory
+      // being visible is that a person owns it.
+      console.log(`# ${file.path} — edit freely, jaa appends and trims.\n`);
+      console.log(readFileSafe(file.path));
+      return;
+    }
+    const { spawn } = await import("node:child_process");
+    const child = spawn(process.env.EDITOR, [file.path], { stdio: "inherit", shell: true });
+    await new Promise<void>((resolve) => child.on("close", () => resolve()));
+  });
+
+memory
+  .command("clear")
+  .description("remove every note from this project's auto-memory, keeping hand-written prose")
+  .option("--yes", "skip the confirmation")
+  .action((opts: { yes?: boolean }) => {
+    const file = readMemory(process.cwd());
+    if (file.entries.length === 0) {
+      console.log(`no auto-memory to clear (${file.path})`);
+      return;
+    }
+    if (opts.yes !== true) {
+      console.error(`jaa: refusing without --yes; this removes ${file.entries.length} note(s) from ${file.path}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(clearMemory(process.cwd()) ? `cleared auto-memory in ${file.path}` : `could not clear ${file.path}`);
+  });
+
+function readFileSafe(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "(no memory file yet — jaa creates it when the agent first calls `remember`)";
+  }
+}
 
 // --- tasks ----------------------------------------------------------------
 const tasks = program

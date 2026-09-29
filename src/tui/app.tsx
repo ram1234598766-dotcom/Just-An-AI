@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useInput } from "ink";
 import { runAgentLoop } from "../agent/loop.js";
-import type { AgentLoopCheckpointOptions, AgentLoopHookOptions, AgentLoopResult } from "../agent/loop.js";
+import type {
+  AgentLoopCheckpointOptions,
+  AgentLoopCompactionOptions,
+  AgentLoopHookOptions,
+  AgentLoopResult,
+  CompactionNotice,
+} from "../agent/loop.js";
 import type { ChatMessage, ResolvedModel, ToolCall, ToolDef } from "../providers/types.js";
 import { clip, formatToolCall, linesFromMessages, summarize, summarizeToolResult } from "./render.js";
 import type { Line, LineKind } from "./render.js";
@@ -54,6 +60,12 @@ export interface ChatAppProps {
    * which is also why a rewind needs `--save` to have anything to rewind.
    */
   checkpoints?: AgentLoopCheckpointOptions;
+  /**
+   * Phase 16: summarise the context when it outgrows the budget. Optional for
+   * the same reason as the others — a host that omits it gets the pre-Phase-16
+   * behaviour, where an over-budget request is trimmed rather than summarised.
+   */
+  compaction?: AgentLoopCompactionOptions;
   // Checkpoint/restore/fork functionality
   onCheckpointState?: (state: CheckpointDisplayInfo | null) => void;
   restoreToTurn?: (turn: number) => Promise<boolean>;
@@ -140,6 +152,14 @@ function prefixFor(kind: LineKind): string {
       return "→ ";
     case "toolResult":
       return "↳ ";
+    // Phase 16: a prefix, not a colour. `colorFor` deliberately returns
+    // undefined for both, so a compaction marker is not mistaken for the model
+    // speaking — which matters because it is the record of something the user
+    // paid for.
+    case "compact":
+      return "~ ";
+    case "notice":
+      return "! ";
     default:
       return "";
   }
@@ -322,9 +342,26 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
           // `runAgentLoop` reads `hooks === undefined` and `checkpoints ===
           // undefined` to decide there is no wiring, so an absent property is
           // what keeps a hookless, checkpointless TUI on the pre-Phase-13/14
-          // path.
+          // path. Compaction follows the same rule.
           ...(props.hooks !== undefined ? { hooks: props.hooks } : {}),
           ...(props.checkpoints !== undefined ? { checkpoints: props.checkpoints } : {}),
+          ...(props.compaction !== undefined ? { compaction: props.compaction } : {}),
+          // A compaction marker goes into the transcript, not just the status
+          // line: the context the model is reasoning over just changed, and a
+          // user reading back through the session needs to see where.
+          ...(props.compaction !== undefined
+            ? {
+                onCompaction: (info: CompactionNotice) => {
+                  addLines([
+                    [
+                      "compact",
+                      `context compacted: ${info.tokensBefore} → ${info.tokensAfter} tokens`,
+                      `${info.calls} summarising call${info.calls === 1 ? "" : "s"}`,
+                    ],
+                  ]);
+                },
+              }
+            : {}),
         });
         setMessages(result.messages);
         setCurrentTurn(result.turnIndex ?? result.messages.length);

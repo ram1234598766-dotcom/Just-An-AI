@@ -1,7 +1,16 @@
 import type { ChatMessage, ToolCall } from "../providers/types.js";
 
 /** One renderable row of the chat transcript. Pure and serializable. */
-export type LineKind = "user" | "assistant" | "toolCall" | "toolResult" | "error";
+/**
+ * The kinds a transcript line can take.
+ *
+ * `compact` and `notice` are Phase 16 additions, both rendered in the neutral
+ * uncoloured band rather than as user or assistant speech. A compaction is
+ * neither: it is something jaa did to the conversation, and colouring it like
+ * the model talking would make a thing the user must know about look like a
+ * thing the model said.
+ */
+export type LineKind = "user" | "assistant" | "toolCall" | "toolResult" | "error" | "compact" | "notice";
 
 export interface Line {
   id: number;

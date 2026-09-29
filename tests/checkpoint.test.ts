@@ -736,6 +736,11 @@ describe("mutating-tool gating", () => {
       patch: (file) => ({ path: file, hunks: [{ oldText: "a", newText: "b" }] }),
       bash: () => ({ command: "echo hi" }),
       git_diff: () => ({ staged: true }),
+      // `remember` (Phase 16) is mutating because it writes a file, but it
+      // declares no `path` — the file it appends to is the project's memory
+      // document, which is checked in, so git restores it and a snapshot of an
+      // append-only file would buy nothing.
+      remember: () => ({ notes: ["a fact about this project"] }),
     };
 
     for (const name of MUTATING_TOOLS) {
@@ -746,8 +751,8 @@ describe("mutating-tool gating", () => {
       createCheckpoint(session, tool(name), build(file), ctx, 1, `call-${name}`);
     }
 
-    // `bash` and `git_diff` are mutating but name no single file, so nothing is
-    // stored for them. Every other mutating tool is covered.
+    // `bash`, `git_diff` and `remember` are mutating but name no single file, so
+    // nothing is stored for them. Every other mutating tool is covered.
     expect(listCheckpoints(session).map((c) => c.toolCallId).sort()).toEqual(["call-patch", "call-write_file"]);
   });
 

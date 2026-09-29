@@ -45,8 +45,13 @@ export function estimateChatTokens(messages: ChatMessage[]): number {
  * result from the assistant message that requested it. A chunk is either a
  * single system/user/plain-assistant message, or an assistant-with-toolCalls
  * message plus every tool result immediately following it.
+ *
+ * Exported because Phase 16 compaction needs the identical grouping, and the
+ * invariant is not something to state twice. Two copies of "which messages must
+ * stay together" is two places for them to disagree, and the disagreement
+ * corrupts a request rather than failing loudly.
  */
-function chunkMessages(messages: ChatMessage[]): ChatMessage[][] {
+export function chunkMessages(messages: ChatMessage[]): ChatMessage[][] {
   const chunks: ChatMessage[][] = [];
   let i = 0;
   while (i < messages.length) {

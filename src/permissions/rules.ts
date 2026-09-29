@@ -21,8 +21,17 @@ export const READ_ONLY_TOOLS: readonly string[] = [
   "git_show",
 ];
 
-/** Tools that change something on disk, or that can execute code. */
-export const MUTATING_TOOLS: readonly string[] = ["write_file", "patch", "bash", "git_diff"];
+/**
+ * Tools that change something on disk, or that can execute code.
+ *
+ * `remember` is in the list because it writes a file into the repository, which
+ * is the only reason it is here. It is deliberately *not* in
+ * `NEVER_IMPLICITLY_ALLOWED`: a permission mode may allow it, because the file
+ * it writes is a checked-in Markdown document holding notes, not code, and
+ * refusing it by default would make auto-memory unusable without an explicit
+ * rule — while still leaving it gated like any other write.
+ */
+export const MUTATING_TOOLS: readonly string[] = ["write_file", "patch", "bash", "git_diff", "remember"];
 
 /**
  * Tools no mode may implicitly allow.
@@ -82,6 +91,7 @@ export const KNOWN_TOOLS: readonly string[] = [
   "git_log",
   "git_diff",
   "git_show",
+  "remember",
 ];
 
 export function isKnownTool(tool: string): boolean {
