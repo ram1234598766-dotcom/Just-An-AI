@@ -251,12 +251,21 @@ export class LspClient {
       try {
         const pulled = await this.getDiagnostics(uri);
         if (pulled !== null) return pulled;
-      } catch (err) {
+      } catch {
         // A server that advertises pull and then refuses it is a push server
-        // with a stale capability. Fall through rather than failing the turn.
-        if (!/unhandled method|method not found/i.test(err instanceof Error ? err.message : String(err))) {
-          throw err;
-        }
+        // with a stale or partial capability, and that must not cost the caller
+        // its diagnostics.
+        //
+        // The failure is deliberately not narrowed to "method not found".
+        // rust-analyzer advertises `textDocument/diagnostic` and answers a pull
+        // for a file it has not finished indexing with a hard error
+        // ("file not found: <path>") rather than an empty result — and on that
+        // server the push channel had the real diagnostics waiting. Re-throwing
+        // there turned a working server into a failed check, and the caller
+        // reported a language problem that did not exist.
+        //
+        // Falling back is safe because every server supported here is required
+        // to publish diagnostics; pull is an optimisation, never the only path.
       }
     }
     return this.waitForDiagnostics(uri, timeoutMs === undefined ? {} : { timeoutMs });
