@@ -1012,6 +1012,9 @@ program
      }
 
      await startChat({
+       // An explicit `--provider` is configuration in itself, so the first-run
+       // screen stays out of the way when someone has already said which one.
+       ...(opts.provider !== undefined ? { explicitProvider: opts.provider } : {}),
        model,
        systemPrompt: opts.system ?? DEFAULT_SYSTEM_PROMPT,
        ...(toolsEnabled ? { tools: registry.list() } : {}),

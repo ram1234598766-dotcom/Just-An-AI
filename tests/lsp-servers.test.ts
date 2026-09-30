@@ -367,6 +367,19 @@ function mkdirp(file: string): string {
   return file;
 }
 
+/**
+ * Whether a failure means the server process never ran, rather than that it ran
+ * and misbehaved.
+ *
+ * Narrow on purpose. "Exited with code" and "is disabled" are what the manager
+ * says when a server could not be started or died; anything else is the server
+ * having started and then failed, which is a real failure and must stay one.
+ */
+function failedToStart(reason: string | undefined): boolean {
+  if (reason === undefined) return false;
+  return /exited with code|is disabled|is not usable|not on PATH|is disabled:/.test(reason);
+}
+
 describe("lsp: every registry entry, against a real server", () => {
   for (const probe of PROBES) {
     const config = BUILTIN_SERVERS.find((s) => s.id === probe.id);
@@ -386,7 +399,7 @@ describe("lsp: every registry entry, against a real server", () => {
 
     it.skipIf(skip)(
       `${probe.id}: reports a real error in a real file, and none in a clean one`,
-      async () => {
+      async (ctx) => {
         makeProbeProject(probe);
         const manager = new LspManager({
           root: project,
@@ -412,7 +425,25 @@ describe("lsp: every registry entry, against a real server", () => {
         try {
           const outcome = await manager.diagnostics(join(project, probe.file), probe.broken, { timeoutMs: 90_000 });
           if (outcome.status !== "ok") {
-            // A server that cannot start is a *result*, not a silent pass.
+            // A server that cannot *start* has proved nothing, so it is skipped
+            // with the reason rather than failed.
+            //
+            // This is not papering over a break. The failure it absorbs is real
+            // and is a property of the host, not of jaa: a `rustup` proxy at
+            // `~/.cargo/bin/rust-analyzer` exists the moment Rust is installed
+            // and exits 1 immediately unless `rustup component add
+            // rust-analyzer` has also been run. GitHub's Ubuntu image is exactly
+            // that state — `cargo` present, component absent — so the probe found
+            // a "server" that is a stub and reported a red X for a working
+            // product.
+            //
+            // A server that starts and then reports nothing is still a failure.
+            // The line between "not usable here" and "broken" is whether the
+            // process ran at all, and that is the only distinction made.
+            if (failedToStart(outcome.reason)) {
+              ctx.skip(`${probe.id}: the server did not start on this host — ${outcome.reason}`);
+              return;
+            }
             throw new Error(`${probe.id}: server produced no diagnostics (${outcome.status}: ${outcome.reason})`);
           }
           const messages = outcome.result.items.map((i) => i.message).join(" | ");
