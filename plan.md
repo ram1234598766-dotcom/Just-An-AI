@@ -115,7 +115,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 17 | Live code intelligence (LSP in the loop) | `b6d2a37` | **done** (1 known limit, 2 claims retracted) |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
-| 20 | The TUI, first-run setup, and making it the default | `c1476db` | **done** (1 known limit) |
+| 20 | The TUI, first-run setup, and making it the default | `c1476db`, `4f839ec` | **done** (3 open limits; L1 closed in a real pty) |
 | 21 | Streaming on every adapter | - | **next** |
 | 22 | Live theme reload + a proper config surface | - | planned |
 | 23 | Diff review in the TUI | - | planned |
@@ -126,24 +126,35 @@ top of the list is closed would misrepresent how much each one costs.
 | 28 | Structured output and tool-result schemas | - | planned |
 | 29 | Edit prediction and inline completion | - | planned |
 | 30 | A test double for providers, and fault injection | - | planned |
+| 31 | Multi-pane workspace, subagent dashboard, keymap, `/export` | - | planned |
 
 ### Dependency order
 
 ```
-20 TUI ──┬─> 21 streaming ──> 27 prompt caching
-         │                     └─> 26 cost accounting
-         ├─> 22 config/theme ──> 23 diff review
-         ├─> 24 sessions ──> 25 attachments
-         ├─> 28 structured output
-         └─> 29 edit prediction
+20 TUI -----> 21 streaming ------> 27 prompt caching
+    |                `-----------> 26 cost accounting
+    |
+    +--------> 22 config/theme --> 23 diff review
+    |                `-----------> 24 sessions --+-> 25 attachments
+    |
+    +--------> 28 structured output
+    +--------> 29 edit prediction
+    +--------> 31 multi-pane (needs 11 permissions,
+    |                15 subagents, 23 diff review, 24 sessions)
 
-30 provider double ── unblocks every phase above that needs a
+30 provider double ---> unblocks every phase above that needs a
                         deterministic, fault-injecting provider
 ```
 
 Two of these are deliberately not "features": 30 exists because every phase after
 it is harder to test without it, and 22 exists because a theme you cannot change
 without restarting is a screenshot, not a setting.
+
+The loop is worth naming: 30 needs 21 to exist before it can assert that a
+streamed message equals a non-streamed one, and 21 is easier to build with 30
+already there. The order above resolves it by taking the interface from Phase 20
+and the adapters second, so 30 lands on a contract that already has two
+implementations to disagree with.
 
 ## Decisions (dated)
 
@@ -1370,6 +1381,96 @@ drive. The project's own `typescript@^7.0.2` type gate is untouched.
       negative, so it is not a dependency. Recorded because "we tried the obvious
       tool and it was redundant" is a result.
 
+
+---
+
+### Phase 18 - Compatibility and interop layer
+
+**Gap closed:** the thesis. Full specification is the compatibility matrix
+section above; this phase is the implementation of it.
+
+- [ ] `src/compat/detect.ts` - probe every source in the read matrix, record
+      path, mtime, size, and precedence rank
+- [ ] `src/compat/memory.ts` - merge `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
+      `.cursorrules`, `.cursor/rules/*.mdc`, `.windsurfrules`, and
+      `.github/copilot-instructions.md` into one attributed project-memory
+      block. No silent rewrite; `jaa doctor` prints the full attribution table
+- [ ] `src/compat/claude.ts` - `.claude/settings.json` permission rules and
+      hook entries; `.claude/agents/*.md` and `.claude/commands/*.md`
+- [ ] `src/compat/codex.ts` - minimal TOML reader for `[mcp_servers.*]`,
+      `model`, `sandbox_mode` from `~/.codex/config.toml`. A focused parser, not
+      a general TOML dependency, unless the gate proves that wrong
+- [ ] `src/compat/opencode.ts` - `mcp`, `plugin`, `instructions`,
+      `permission`, and `agent` from `opencode.json` at both project and global
+      scope. Plugin *files* are listed, never executed
+- [ ] `src/compat/mcpjson.ts` - Claude Code `.mcp.json` -> jaa MCP clients
+- [ ] `src/compat/sync.ts` - `jaa compat sync`: generate `AGENTS.md` (guarded),
+      `CLAUDE.md`, and `.mcp.json`. Refuses to overwrite hand-written content
+      without `--force`, and writes a `.jaa/compat-manifest.json` recording what
+      it generated so a later sync can update rather than duplicate
+- [ ] `src/compat/print.ts` - `jaa compat print <codex|opencode|claude|all>`
+      emits ready-to-paste config to stdout
+- [ ] `src/compat/export.ts` - `jaa exec --output json|stream-json`, exit codes
+      `0/1/2/3`, and `jaa agent export` to `.claude/agents/*.md` and
+      `.codex/agents/*.toml`
+- [ ] `tests/fixtures/multi-harness-repo/` - a fixture repository containing
+      every read-matrix file
+- [ ] `tests/compat.test.ts` - one test per numbered acceptance assertion in
+      the matrix, plus precedence-order tests and a no-clobber test
+
+**Gate:** the five acceptance assertions in the matrix section all pass against
+the fixture repository with zero jaa-specific configuration.
+
+**Risk:** precedence surprises. A user may expect `CLAUDE.md` to win because
+that is their daily driver. Mitigation: precedence is documented, printed by
+`jaa doctor`, and overridable with an explicit `jaa` config key.
+
+---
+
+### Phase 19 - Plugin system and registry
+
+**Gap closed:** ranked #7. Skills and subagents cannot currently be bundled and
+distributed as one unit.
+
+**Competitor parity:** Claude Code plugin manifests bundling skills, agents,
+hooks, MCP servers, LSP servers, output styles, themes, and `bin`; Codex
+marketplace with 90+ first-party plugins; DeepSeek's everything-is-a-plugin
+Cordis model; opencode's `plugin` array.
+
+- [ ] `src/plugins/manifest.ts` - `jaa-plugin.json` schema: `name`, `version`,
+      `description`, `author`, `homepage`, `repository`, `license`, and
+      component paths for `skills`, `agents`, `hooks`, `mcpServers`,
+      `lspServers`, `themes`, `bin`. Read `.claude-plugin/plugin.json` too, so
+      Claude Code plugins install directly
+- [ ] `src/plugins/install.ts` - install from a local path, a git URL, or an
+      npm tarball; verify the manifest before writing; atomic install with
+      rollback on failure
+- [ ] `src/plugins/load.ts` - layered load: global then project, later layers
+      merge by name. Namespaced agent and skill ids (`plugin-name:skill-name`)
+      so two plugins cannot collide
+- [ ] `src/plugins/registry.ts` - discovery, search, install, remove, enable,
+      disable, update. Local and remote catalogs
+- [ ] `src/plugins/bin.ts` - plugin-provided executables added to the Bash
+      tool's `PATH` for the session only, never to the user's shell profile
+- [ ] Security: plugin code is executable. Plugin-provided tools, hooks, and
+      agents are subject to the Phase 11 permission engine and the Phase 12
+      sandbox. A plugin cannot widen permissions. Installing a plugin from an
+      untrusted source prints exactly what it will execute and requires
+      confirmation
+- [ ] `src/cli/index.ts` - `jaa plugin list|search|install|remove|enable|
+      disable|update|inspect`
+- [ ] `tests/plugins.test.ts` - manifest validation, layered merge, namespacing,
+      install rollback, PATH scoping, and a test proving a plugin cannot escalate
+      permissions
+
+**Gate:** a Claude Code plugin with skills, agents, and an MCP server installs
+into jaa and all three components work. Two plugins with colliding skill names
+coexist. A plugin cannot grant itself a permission the session does not have.
+
+**Risk:** this is the largest new attack surface in the roadmap. Mitigation:
+Phase 11 and 12 are hard prerequisites, plugin install is explicit and
+inspectable, and `bin` injection is session-scoped.
+
 ---
 
 ### Phase 20 - The TUI, and making it the default
@@ -1496,146 +1597,7 @@ stacked, so you can see both where to type and what just happened.
 
 ---
 
-### Phase 18 - Compatibility and interop layer
-
-**Gap closed:** the thesis. Full specification is the compatibility matrix
-section above; this phase is the implementation of it.
-
-- [ ] `src/compat/detect.ts` - probe every source in the read matrix, record
-      path, mtime, size, and precedence rank
-- [ ] `src/compat/memory.ts` - merge `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
-      `.cursorrules`, `.cursor/rules/*.mdc`, `.windsurfrules`, and
-      `.github/copilot-instructions.md` into one attributed project-memory
-      block. No silent rewrite; `jaa doctor` prints the full attribution table
-- [ ] `src/compat/claude.ts` - `.claude/settings.json` permission rules and
-      hook entries; `.claude/agents/*.md` and `.claude/commands/*.md`
-- [ ] `src/compat/codex.ts` - minimal TOML reader for `[mcp_servers.*]`,
-      `model`, `sandbox_mode` from `~/.codex/config.toml`. A focused parser, not
-      a general TOML dependency, unless the gate proves that wrong
-- [ ] `src/compat/opencode.ts` - `mcp`, `plugin`, `instructions`,
-      `permission`, and `agent` from `opencode.json` at both project and global
-      scope. Plugin *files* are listed, never executed
-- [ ] `src/compat/mcpjson.ts` - Claude Code `.mcp.json` -> jaa MCP clients
-- [ ] `src/compat/sync.ts` - `jaa compat sync`: generate `AGENTS.md` (guarded),
-      `CLAUDE.md`, and `.mcp.json`. Refuses to overwrite hand-written content
-      without `--force`, and writes a `.jaa/compat-manifest.json` recording what
-      it generated so a later sync can update rather than duplicate
-- [ ] `src/compat/print.ts` - `jaa compat print <codex|opencode|claude|all>`
-      emits ready-to-paste config to stdout
-- [ ] `src/compat/export.ts` - `jaa exec --output json|stream-json`, exit codes
-      `0/1/2/3`, and `jaa agent export` to `.claude/agents/*.md` and
-      `.codex/agents/*.toml`
-- [ ] `tests/fixtures/multi-harness-repo/` - a fixture repository containing
-      every read-matrix file
-- [ ] `tests/compat.test.ts` - one test per numbered acceptance assertion in
-      the matrix, plus precedence-order tests and a no-clobber test
-
-**Gate:** the five acceptance assertions in the matrix section all pass against
-the fixture repository with zero jaa-specific configuration.
-
-**Risk:** precedence surprises. A user may expect `CLAUDE.md` to win because
-that is their daily driver. Mitigation: precedence is documented, printed by
-`jaa doctor`, and overridable with an explicit `jaa` config key.
-
----
-
-### Phase 19 - Plugin system and registry
-
-**Gap closed:** ranked #7. Skills and subagents cannot currently be bundled and
-distributed as one unit.
-
-**Competitor parity:** Claude Code plugin manifests bundling skills, agents,
-hooks, MCP servers, LSP servers, output styles, themes, and `bin`; Codex
-marketplace with 90+ first-party plugins; DeepSeek's everything-is-a-plugin
-Cordis model; opencode's `plugin` array.
-
-- [ ] `src/plugins/manifest.ts` - `jaa-plugin.json` schema: `name`, `version`,
-      `description`, `author`, `homepage`, `repository`, `license`, and
-      component paths for `skills`, `agents`, `hooks`, `mcpServers`,
-      `lspServers`, `themes`, `bin`. Read `.claude-plugin/plugin.json` too, so
-      Claude Code plugins install directly
-- [ ] `src/plugins/install.ts` - install from a local path, a git URL, or an
-      npm tarball; verify the manifest before writing; atomic install with
-      rollback on failure
-- [ ] `src/plugins/load.ts` - layered load: global then project, later layers
-      merge by name. Namespaced agent and skill ids (`plugin-name:skill-name`)
-      so two plugins cannot collide
-- [ ] `src/plugins/registry.ts` - discovery, search, install, remove, enable,
-      disable, update. Local and remote catalogs
-- [ ] `src/plugins/bin.ts` - plugin-provided executables added to the Bash
-      tool's `PATH` for the session only, never to the user's shell profile
-- [ ] Security: plugin code is executable. Plugin-provided tools, hooks, and
-      agents are subject to the Phase 11 permission engine and the Phase 12
-      sandbox. A plugin cannot widen permissions. Installing a plugin from an
-      untrusted source prints exactly what it will execute and requires
-      confirmation
-- [ ] `src/cli/index.ts` - `jaa plugin list|search|install|remove|enable|
-      disable|update|inspect`
-- [ ] `tests/plugins.test.ts` - manifest validation, layered merge, namespacing,
-      install rollback, PATH scoping, and a test proving a plugin cannot escalate
-      permissions
-
-**Gate:** a Claude Code plugin with skills, agents, and an MCP server installs
-into jaa and all three components work. Two plugins with colliding skill names
-coexist. A plugin cannot grant itself a permission the session does not have.
-
-**Risk:** this is the largest new attack surface in the roadmap. Mitigation:
-Phase 11 and 12 are hard prerequisites, plugin install is explicit and
-inspectable, and `bin` injection is session-scoped.
-
----
-
-### Phase 20 - TUI overhaul
-
-**Gap closed:** ranked #6. The most visible surface is the least developed, and
-it is the last phase so it can render everything the previous nine built.
-
-**Competitor parity:** Codex's Rust TUI with vim motions, `/export`, session
-picker, agent dashboard, and cost-aware status line; opencode's Go TUI with
-themes, keybinds, and attention notifications; DeepSeek's typed tool cards.
-
-- [ ] `src/tui/cards.ts` - typed result cards, following DeepSeek's model
-      because it is the best of the four: `diff` (inline hunks for every
-      mutation), `terminal` (command, cwd, live output, exit code), `search`
-      (grouped matches with truncated/total so a capped result never reads as
-      complete), `web`, and `generic`. Every card carries `locations` so an
-      editor can follow along
-- [ ] `src/tui/layout.tsx` - multi-pane: transcript, tool activity, subagent
-      tree, and a dockable task board. Pane focus, split, and resize on
-      `Ctrl-p`
-- [ ] `src/tui/dashboard.tsx` - the agent dashboard: every live subagent with
-      state, current tool, elapsed time, and token spend. Attach, steer, and
-      stop from the dashboard
-- [ ] `src/tui/permissions.tsx` - an inline approval prompt rendered as a
-      first-class card showing the exact command, the rule that matched, and
-      the decision options
-- [ ] `src/tui/themes.ts` - themeable color tokens, light and dark, with a
-      `~/.jaa/theme.json` override; respect `NO_COLOR` and
-      `prefers-reduced-motion`
-- [ ] `src/tui/keybinds.ts` - configurable keymap with a discoverable palette
-- [ ] `src/tui/motions.tsx` - vim motions in the composer; expand and collapse;
-      incremental streaming render
-- [ ] `src/tui/export.ts` - `/export` to Markdown, including tool calls, diffs,
-      and the compaction markers
-- [ ] Accessibility: full keyboard reachability, visible focus, correct ARIA,
-      a screen-reader-friendly non-visual transcript mode, and no information
-      conveyed by color alone
-- [ ] `tests/tui/*.test.tsx` - card rendering per type, approval flow, dashboard
-      lifecycle, theme override, keymap override, export fidelity, and an
-      automated axe pass on the non-interactive transcript view
-
-**Gate:** a full session -- subagents, approvals, diffs, a compaction event, a
-crashed tool -- renders correctly with no layout corruption at 80x24 and at
-200x60. Every action is reachable by keyboard alone. The axe pass reports zero
-serious violations.
-
-**Risk:** Ink is a React renderer for a terminal, and heavy live updates can
-drop frames. Mitigation: incremental rendering with bounded update frequency,
-a frame budget, and a headless render test that asserts update counts.
-
----
-
-## Phases 21-30, in detail
+## Phases 21-31, in detail
 
 Each phase below is scoped so the *definition of done* is checkable, and each
 names what it will break if it is done wrong. A phase whose success cannot be
@@ -1877,15 +1839,73 @@ is barely tested at all.
 network, and every fallback in `tests/loop-stream.test.ts` is exercised through
 the router rather than around it.
 
+## Phase 31 - Multi-pane workspace, and the surfaces a session actually needs
+
+This phase is here because a stale draft of Phase 20 specified it under files
+that were never created (`src/tui/cards.ts`, `layout.tsx`, `dashboard.tsx`,
+`permissions.tsx`, `themes.ts`, `keybinds.ts`, `motions.tsx`, `export.ts`). The
+scope was real; the file map was fiction. Retiring the draft without carrying the
+scope forward would have quietly deleted the largest unbuilt affordance in the
+product, so it is restated here against the layout that exists.
+
+What Phase 20 actually built, for the avoidance of doubt: `src/tui/render.ts`,
+`components.tsx`, `commands.ts`, `app.tsx`, `theme.ts`, `setup.tsx`,
+`setup-state.ts`, `local-models.ts`. Cards live in `components.tsx` and the theme
+registry is `theme.ts`. Phase 31 adds to those files and introduces three new
+ones.
+
+**Gap closed:** the gap between what jaa does and what a person can see it doing.
+Phase 15 runs subagents in parallel with a per-agent token count; there is no
+place to watch that, steer it, or stop it.
+
+- [ ] `src/tui/keybinds.ts` - a configurable keymap with a discoverable palette.
+      Every binding is listed by a command that renders the current map, because
+      an undiscoverable keymap is a keymap nobody changes. Conflicts are
+      reported at load, not silently resolved by precedence
+- [ ] `src/tui/layout.tsx` - multi-pane: transcript, tool activity, subagent
+      tree, and a dockable task board. Focus, split, and resize on a binding
+      from `keybinds.ts`. Single-pane remains the default, because a layout is a
+      preference and defaulting to the complex one makes the first run worse
+- [ ] `src/tui/dashboard.tsx` - every live subagent with state, current tool,
+      elapsed time, and token spend, attach/steer/stop from the dashboard.
+      Reads the orchestrator's live state; it does not keep a parallel copy,
+      which is how a dashboard starts lying
+- [ ] An inline approval card in `components.tsx`, rendering a decision from
+      `src/permissions/engine.ts` as a first-class card showing the exact
+      command, the rule that matched, and the options. The engine already exists
+      and is tested; only its presentation is missing
+- [ ] `/export` to Markdown in `commands.ts`, including tool calls, diffs, and
+      compaction markers. The transcript is already structured, so this is a
+      serializer, not a scraping job
+- [ ] Vim motions in the composer, plus expand and collapse
+- [ ] Accessibility, which is a requirement and not a pass at the end: full
+      keyboard reachability, visible focus, correct ARIA, a non-visual transcript
+      mode for screen readers, and no information carried by colour alone. An
+      automated axe pass over the non-visual transcript
+
+**Gate:** a full session -- subagents, approvals, diffs, a compaction event, a
+crashed tool -- renders correctly at 80x24 and at 200x60 with no layout
+corruption. Every action is reachable by keyboard alone. The axe pass reports
+zero serious violations.
+
+**Risk:** Ink is a React renderer for a terminal, and many live-updating panes
+will drop frames. Mitigation: bounded update frequency, a frame budget, and a
+headless render test that asserts update counts rather than trusting the eye. The
+second risk is the dashboard lying: it must render orchestrator state, never a
+local mirror of it, or a stalled agent will look busy.
+
 ---
 
-## Deferred past Phase 20
+## Deferred beyond Phase 31
 
 Recorded so they are not lost, explicitly not in the competitive-core scope:
 
 - Code Mode -- a model-generated TypeScript program that orchestrates many tool
   rounds in one call. This is DeepSeek's genuine innovation and the one place
-  jaa would need to out-invent rather than out-ship. Highest-value Phase 21.
+  jaa would need to out-invent rather than out-ship. It is deliberately not
+  scheduled: it needs Phase 30's provider double to be testable at all, because
+  a program that runs many tool rounds is exactly what a flaky provider turns
+  into an unreproducible bill. Highest-value phase after 31.
 - Background and scheduled execution -- durable jobs, wakeup scheduling, a
   GitHub Action, cost and status lines.
 - Provider depth -- OAuth subscription auth for Claude Pro/Max and ChatGPT
