@@ -381,10 +381,15 @@ describe.skipIf(!hasServer)("lsp: against a real language server", () => {
       // and is right for a single edited file; here it expired on a loaded
       // machine and the test reported "typescript reported: (nothing)", which
       // reads exactly like a broken server and is not one.
+      //
+      // Generous because indexing a repository of this size genuinely takes
+      // that long when it is competing with the rest of the suite, and because a
+      // test that flapped on machine load would be a test people learned to
+      // re-run rather than read.
       const manager = new LspManager({
         root: process.cwd(),
         timeoutMs: 120_000,
-        diagnosticWaitMs: 60_000,
+        diagnosticWaitMs: 120_000,
       });
       const brokenFile = resolve("src/__lsp_gate_probe.ts");
       const cleanFile = resolve("src/__lsp_gate_clean.ts");

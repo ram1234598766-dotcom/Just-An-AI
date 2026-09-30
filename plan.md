@@ -115,29 +115,35 @@ top of the list is closed would misrepresent how much each one costs.
 | 17 | Live code intelligence (LSP in the loop) | `b6d2a37` | **done** (1 known limit, 2 claims retracted) |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
-| 20 | The TUI, and making it the default | - | **done** (2 known limits) |
+| 20 | The TUI, first-run setup, and making it the default | `c1476db` | **done** (1 known limit) |
+| 21 | Streaming on every adapter | - | **next** |
+| 22 | Live theme reload + a proper config surface | - | planned |
+| 23 | Diff review in the TUI | - | planned |
+| 24 | Multi-session and a session switcher | - | planned |
+| 25 | Attachment pipeline (images, files, URLs) | - | planned |
+| 26 | Cost accounting and a budget the agent respects | - | planned |
+| 27 | Prompt caching, done properly | - | planned |
+| 28 | Structured output and tool-result schemas | - | planned |
+| 29 | Edit prediction and inline completion | - | planned |
+| 30 | A test double for providers, and fault injection | - | planned |
 
 ### Dependency order
 
 ```
-10 benchmark
-  |
-  +-- 11 permissions  --> 12 sandbox  --> 13 hooks
-                                  |
-  +-- 14 checkpoint ---------------+--> 15 multi-agent
-                                              |
-  +-- 16 compaction                            |
-  +-- 17 lsp-loop                             |
-  +-- 18 compat                               |
-  +-- 19 plugins ------------------------------+
-  +-- 20 tui (renders everything above it) <----+
+20 TUI ──┬─> 21 streaming ──> 27 prompt caching
+         │                     └─> 26 cost accounting
+         ├─> 22 config/theme ──> 23 diff review
+         ├─> 24 sessions ──> 25 attachments
+         ├─> 28 structured output
+         └─> 29 edit prediction
+
+30 provider double ── unblocks every phase above that needs a
+                        deterministic, fault-injecting provider
 ```
 
-Rationale: permissions before sandbox (the sandbox is what permissions toggle),
-permissions before hooks (a `PreToolUse` hook returns a permission decision),
-checkpoint before multi-agent (worktree isolation and rewind share the same
-snapshot machinery), and TUI last so it can render diagnostics, subagent
-activity, and permission prompts that only exist by Phase 19.
+Two of these are deliberately not "features": 30 exists because every phase after
+it is harder to test without it, and 22 exists because a theme you cannot change
+without restarting is a screenshot, not a setting.
 
 ## Decisions (dated)
 
@@ -1432,18 +1438,61 @@ stacked, so you can see both where to type and what just happened.
 
 #### Known limits carried out of Phase 20
 
-- [ ] **L1 - No pty test on a headless Windows host.** The component is driven
-      through `ink-testing-library` and the real renderer is driven through a
-      TTY-shaped stream, but neither is a real console, so cursor motion and
-      repaint behaviour are not verified end to end. `node-pty` was installed and
-      fails with `AttachConsole` outside an interactive session. Stated rather
-      than worked around: a layout that passes both harnesses and is unreadable in
-      a shell is a real gap, not a hypothetical one.
+- [x] **L1 (closed) - The interface is now verified in a real terminal.** WSL 2
+      provides a pty on Windows, and `tools/tui-pty-drive.py` drives the built
+      CLI through Python's `pty` module; the same driver runs natively on a Linux
+      runner. It asserts on things a fake writable never produces: that Ink hides
+      the cursor, emits DECSET 2026 (synchronized output), erases a line before
+      rewriting it, and restores the cursor on a clean exit.
+
+      Three findings came out of it, none of which any other harness could see:
+
+      1. **A pty with a 0x0 winsize makes the TUI render nothing at all.** Node
+         reads the width via ioctl, not from `COLUMNS`, so setting the
+         environment variable does nothing. Ink sizes itself to zero, the frame
+         comes out empty, and the interface looks broken while being fine. The
+         driver now sets the winsize *and* verifies it by asking a child process,
+         so an unusable terminal is reported as an unusable terminal.
+      2. Ink repaints by erasing and rewriting a line, which is why a repaint does
+         not scroll the transcript off the top.
+      3. The pty suite cannot share a test pool. Twenty seconds of uncontended
+         terminal time, asked of a pool running forty other files — several of
+         which spawn real language servers — failed against a different neighbour
+         every run. A check that is only reliable on an idle machine is a check
+         that gets deleted, so it has its own config, script and CI step.
+
 - [ ] **L2 - Only the OpenAI-compatible adapter streams.** `ChatStreamChunk`
       exists on the adapter interface and the Anthropic, Google and Ollama
       adapters do not implement it yet, so those get the non-streaming path and
-      the text still appears — just all at once. The interface and the fallback
-      are in place; the adapters are the remaining work.
+      the text still appears — just all at once. The interface and the three
+      fallbacks       are in place and tested; the adapters are the remaining work, and
+      they are Phase 21.
+- [ ] **L3 - The whole-repository TypeScript probe is load-sensitive.** Unlike
+      the other language-server probes, which run against a throwaway fixture,
+      this one points `tsserver` at the jaa repository itself so it indexes a real
+      project. Under a full 40-file test pool on a loaded host that index can
+      still exceed the 120s push wait, and the failure reads as "typescript
+      reported: (nothing)" — indistinguishable from a broken server. It passes
+      alone and passed on a second consecutive full run, so it is contention
+      rather than a defect, but it is recorded rather than smoothed over: a test
+      that flaps on machine load is a test people learn to re-run instead of
+      read. The durable fix is to move it to a fixture that is large enough to be
+      realistic and small enough to be fast, which is Phase 30's provider-double
+      work applied to the language-server harness.
+- [ ] **L4 - The real-language-server probes compete for the machine.** The
+      `lsp-servers` suite starts five real servers — typescript-language-server,
+      pyright, clangd, gopls and a JDT LS JVM — and they index while forty other
+      files run. Observed on a loaded host: a different probe failing on each
+      full run, each passing alone, with the same code and the same servers.
+      That is contention, not a defect, but a suite whose failure names a
+      different victim each time is a suite people stop reading.
+
+      The pty suite was already split out for exactly this reason and CI runs it
+      separately. The same treatment belongs here: extract the two real-server
+      `describe` blocks into their own files, exclude them from the default pool,
+      and give CI a step for them. Recorded as a limit rather than done quietly,
+      because a fix that is described but not landed is the thing this project
+      has been retracting all along.
 
 ---
 
@@ -1583,6 +1632,250 @@ serious violations.
 **Risk:** Ink is a React renderer for a terminal, and heavy live updates can
 drop frames. Mitigation: incremental rendering with bounded update frequency,
 a frame budget, and a headless render test that asserts update counts.
+
+---
+
+## Phases 21-30, in detail
+
+Each phase below is scoped so the *definition of done* is checkable, and each
+names what it will break if it is done wrong. A phase whose success cannot be
+demonstrated is not a phase.
+
+---
+
+### Phase 21 - Streaming on every adapter
+
+**Why first.** It is Phase 20's L2, it is the single biggest perceived-latency
+win available, and the contract is already written and tested by
+`tests/loop-stream.test.ts`. Three fallbacks are in place and proven: an empty
+stream re-runs non-streaming (so a tool turn is never lost), a stream that dies
+mid-turn re-runs and reports `onStreamReplace` (so a partial answer is never
+presented as a whole one), and a stream with no usage is estimated (so the
+context gauge is never pinned at zero).
+
+**What is actually hard.** Not the text — all three SDKs stream text. It is:
+
+- **Tool calls.** The OpenAI-compatible stream yields text only. Anthropic
+  streams `content_block_start`/`delta`/`stop` and can put a tool use in any
+  block; Gemini streams function calls as a trailing part. Each needs its own
+  assembler, and each assembler's output must equal the non-streaming message for
+  the same request. That equality is the acceptance test, not "it streamed".
+- **Usage.** Reported on different events by each provider, sometimes more than
+  once, sometimes never.
+- **Interruption.** Ctrl+C mid-stream must cancel the provider request, not leave
+  a half-painted frame.
+
+**Definition of done.**
+- `ProviderAdapter.stream` implemented for anthropic, gemini and ollama.
+- A property test per adapter: for N scripted responses, the streamed message
+  (content *and* tool calls) is deep-equal to the non-streaming one. Fails if an
+  assembler drops or reorders a block.
+- Ctrl+C during a stream leaves the transcript consistent and the provider
+  request cancelled.
+- All six registry entries of the loop's stream contract tests run against every
+  adapter.
+
+**What it breaks if done wrong:** a tool call assembled from a partial stream is
+worse than no streaming at all, because the model appears to want a tool and
+nothing happens. The equality test exists to make that impossible to merge.
+
+---
+
+### Phase 22 - Live theme reload, and a config surface worth using
+
+**Why.** Phase 20 shipped themes that need a restart, which makes them a
+screenshot rather than a setting. The palette is a module constant read at
+import; that is the whole limitation.
+
+**What.**
+- `loadTheme()` reads `ui.theme` and is re-read on a filesystem watch of the
+  config. A changed theme repaints without a restart.
+- Move colours off module constants into a React context, so a change is a
+  re-render rather than a process restart. This is the real work; the watch is
+  the easy half.
+- `jaa config` gets `list`, `get`, `set`, `unset`, `path`, `edit`, and prints
+  *every* key with its current value and a one-line explanation. The setting
+  exists today; discovering it does not.
+- A `ui` block beyond `theme`: `gaugeWidth`, `showStatusBar`, `showToolTiming`,
+  `animations` (honouring `prefers-reduced-motion` automatically), `maxWidth`.
+- A preview command: `jaa config set ui.theme X && jaa config preview ui` shows
+  the chat chrome in every theme and exits.
+
+**Definition of done.** A theme change repaints within one frame of the config
+file being written, with no restart. A key exists in the config schema, is
+listed by `jaa config list`, is settable by path, and is documented — asserted by
+a test that walks the schema, because a setting nobody can find is not a setting.
+
+---
+
+### Phase 23 - Diff review in the TUI
+
+**Why.** jaa writes files and reverts them. Right now the operator sees
+`✓ write_file src/a.ts 142B` and has to go and look. This is the highest-value
+missing affordance in the whole product: it is where an agent earns or loses
+trust.
+
+**What.**
+- A split view: the file before, the file after, hunks coloured by add/remove.
+- Enter opens the hunk, `y` accepts, `n` rejects, `a` accepts all, `q` rejects
+  all and asks the agent to try again.
+- Rejection feeds back into the loop as a tool result, so the model learns what
+  was not wanted rather than the operator just undoing it afterwards.
+- A pending-changes list across the session, with the rewind target visible
+  beside each file so `/rewind` and review are the same mental model.
+
+**Definition of done.** An operator can review and partially reject a five-file
+change without leaving the TUI, and the agent's next turn reflects the
+rejections. Tested by driving a scripted agent that writes, rejects, and rewrites.
+
+**What it breaks if done wrong.** A review UI that cannot be trusted to show the
+*real* file is worse than none, because the operator approves what they were
+shown rather than what was written. So the diff must be rendered from disk after
+the write, not from a buffer the tool passed in.
+
+---
+
+### Phase 24 - Multi-session and a switcher
+
+**Why.** `jaa chat` is one argument-free session. A real week of work is
+several, and today the only way to get another is `--resume`, which is a restart.
+
+**What.**
+- A live session list, with a picker bound to a key.
+- Fork from any turn into a new session, keeping the transcript prefix.
+- Named sessions, and search across transcripts (`/sessions <text>`).
+- A session summary line the operator can scan: last activity, turns, files
+  touched, cost.
+
+**Definition of done.** Switching sessions preserves both transcripts and the
+active one, mid-turn switching is refused rather than half-applied, and a forked
+session can be resumed from either side.
+
+---
+
+### Phase 25 - Attachment pipeline
+
+**Why.** An agent that cannot see a screenshot cannot fix a UI, and a terminal
+user pastes a URL where a person pastes an image.
+
+**What.**
+- `jaa ask "@file.png describe this"`, `@file.ts`, `@https://…`, and a bare path
+  is detected as an image by extension and magic bytes.
+- Images are read, resized to a provider-appropriate size, and sent as the
+  provider's native content blocks — not base64 stuffed into a text message,
+  which every provider bills differently and most reject.
+- URLs are fetched once, converted to markdown, and cached by content hash so
+  the same URL in a later turn is free.
+- Text files respect an explicit size cap and say so when they are truncated,
+  rather than silently sending the first 8 000 characters.
+
+**Definition of done.** An image round-trips to a provider that supports vision
+and to one that does not (with a stated refusal rather than a silent one), and a
+truncated file says it was truncated.
+
+---
+
+### Phase 26 - Cost accounting, and a budget the agent respects
+
+**Why.** The status bar shows tokens. Tokens are not money, and a user who
+cannot see the number cannot decide whether to keep going.
+
+**What.**
+- Per-request cost from the provider's own pricing table, kept as data with a
+  date so a stale price is visible rather than silently wrong.
+- A running total per session and per day, and an at-a-glance figure in the
+  status bar.
+- A budget: `jaa ask --budget 1.00` and a session-level equivalent. The loop
+  checks it *before* a request and stops cleanly with an explanation, rather
+  than discovering the overrun afterwards.
+- A `--report-cost` flag that prints the per-turn breakdown.
+
+**Definition of done.** A scripted session's cost is asserted to the cent against
+a fixture, and a budget of zero stops the loop before the first request rather
+than after it.
+
+**What it breaks if done wrong.** A budget checked *after* a request is a
+reporting feature pretending to be a control. The check has to be pre-flight.
+
+---
+
+### Phase 27 - Prompt caching, done properly
+
+**Why.** Phase 16 compacts the conversation; it does not stop re-sending a stable
+prefix. For a long session this is often the largest single cost.
+
+**What.**
+- Providers expose cache-read and cache-write token counts; they are currently
+  discarded. Capture them, show them, and separate them in cost reporting.
+- Stable prefixes: the system prompt and tool definitions are already stable,
+  and the first turns of a session are stable until compacted. Track which.
+- Where a provider supports an explicit cache TTL, set it.
+
+**Definition of done.** A second turn against a provider that reports cache reads
+shows a non-zero cache-read count, and the cost report reflects the discount. A
+provider that does not report it is shown as unknown rather than as zero.
+
+---
+
+### Phase 28 - Structured output and tool-result schemas
+
+**Why.** Tool results are strings. A string has to be re-parsed by the model and
+re-parsed again by jaa to render a card, and anything ambiguous becomes a wrong
+tool call.
+
+**What.**
+- An optional JSON Schema per tool, sent to providers that support it, so a tool
+  result is validated at the boundary and a malformed result is a clear error
+  rather than a model's guess.
+- A typed result envelope on the tool result, so the TUI can render structured
+  data instead of summarising it — a file list as a list, a diff as a diff.
+
+**Definition of done.** A tool that declares a schema and returns a violating
+result fails with the violation named, and one that returns a conforming result
+has it rendered as structure rather than as text.
+
+---
+
+### Phase 29 - Edit prediction and inline completion
+
+**Why.** The highest-frequency interaction in a coding agent is typing at a
+prompt. Everything else is occasional.
+
+**What.**
+- FIM-style completion against the model, on a debounce, only when the cursor is
+  in a plausible position.
+- A strict latency budget: anything slower than the budget is discarded, because
+  a slow completion that arrives after the user has typed is worse than none.
+- Explicitly off in `--permission-mode full-auto` unless asked for: unsolicited
+  model calls are a cost and a latency surprise.
+
+**Definition of done.** A completion that arrives after the budget is discarded
+and never overwrites what the user typed, asserted by a test with a deliberately
+slow fake provider.
+
+---
+
+### Phase 30 - A provider test double, and fault injection
+
+**Why it is a phase and not a chore.** Every phase above needs a provider that is
+deterministic, can be told to fail in a specific way, and does not need a key.
+Today every adapter test either hits the network or fakes the adapter inline,
+which means the *router* — the part that actually decides which adapter runs —
+is barely tested at all.
+
+**What.**
+- A `FakeProvider` implementing the full adapter contract, scriptable by
+  response, and able to inject: mid-stream failure, a stream that never
+  terminates, usage that is missing, a tool call split across blocks, a rate
+  limit, and a 500.
+- A `--fake` mode for `jaa ask` so a human can drive the whole TUI with no key
+  and no network.
+- Fault injection wired through the loop's own tests, so the three fallbacks in
+  Phase 21 are exercised against a real adapter rather than a stub.
+
+**Definition of done.** `jaa ask --fake` drives a full session end to end with no
+network, and every fallback in `tests/loop-stream.test.ts` is exercised through
+the router rather than around it.
 
 ---
 
