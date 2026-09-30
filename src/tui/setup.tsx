@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { backToProviders, choose, confirmKey, detectSetup, initialSetupState, moveCursor, skip } from "./setup-state.js";
+import { backToProviders, choose, confirmKey, currentKeyUrl, detectSetup, initialSetupState, moveCursor, skip } from "./setup-state.js";
 import type { SetupState } from "./setup-state.js";
 import { formatModelSize } from "./local-models.js";
 import { ACCENT, ACTIVE_THEME_NAME, RULE, THEME_NAMES, colorFor } from "./theme.js";
@@ -46,7 +46,16 @@ export function SetupScreen({ onDone }: { onDone: () => void }): React.JSX.Eleme
         return;
       }
       if (key.return) {
-        setState(confirmKey(state));
+        const next = confirmKey(state);
+        setState(next);
+        // `onDone` has to fire here as well as in the list branch below.
+        //
+        // Without it the key is stored, the screen says "using OpenAI", and
+        // nothing else happens: `Shell` only swaps in the chat when setup says
+        // it is finished, so someone who gave a perfectly good key sat staring
+        // at a confirmation they could not get past, with no error anywhere.
+        // The key screen looked like it had worked. It had not.
+        if (next.step === "done") onDone();
         return;
       }
       if (key.backspace || key.delete) {
@@ -71,6 +80,14 @@ export function SetupScreen({ onDone }: { onDone: () => void }): React.JSX.Eleme
       return;
     }
     if (key.escape || raw === "q") {
+      // Esc steps back rather than quitting, from the model list as well. The key
+      // bar is handled above and has already returned by here. Otherwise choosing
+      // Ollama with nothing pulled is a dead end whose only exit discards the
+      // session.
+      if (state.step === "choose-local") {
+        setState(backToProviders(state));
+        return;
+      }
       skip(state);
       onDone();
     }
@@ -91,9 +108,9 @@ export function SetupScreen({ onDone }: { onDone: () => void }): React.JSX.Eleme
         <Text>
           <Text color={ACCENT} bold>
             {"  "}
-            local models found
+            ollama · local models
           </Text>
-          <Text dimColor> — no key needed</Text>
+          <Text dimColor> — no key, no account, no cost</Text>
         </Text>
         <List
           rows={state.local.map((model) => ({
@@ -102,9 +119,21 @@ export function SetupScreen({ onDone }: { onDone: () => void }): React.JSX.Eleme
             note: formatModelSize(model.sizeBytes),
           }))}
           cursor={state.cursor}
-          empty="none"
+          empty="none pulled yet"
         />
-        <Footer hint="↑/↓ choose · Enter use this · Ctrl+C skip" />
+        {state.local.length === 0 ? (
+          <Box flexDirection="column" marginTop={1}>
+            <Text dimColor>{"    is ollama running?  "}</Text>
+            <Text {...(colorFor("url") !== undefined ? { color: colorFor("url") as string } : {})}>
+              {"    ollama serve"}
+            </Text>
+            <Text dimColor>{"    then pull a model:  ollama pull llama3.2"}
+            </Text>
+            <Text dimColor>{"    Esc goes back to the provider list"}
+            </Text>
+          </Box>
+        ) : null}
+        <Footer hint="↑/↓ choose · Enter use this · Esc back · Ctrl+C skip" />
       </Box>
     );
   }
@@ -118,18 +147,18 @@ export function SetupScreen({ onDone }: { onDone: () => void }): React.JSX.Eleme
             {"  "}
             pick a provider
           </Text>
-          <Text dimColor> — or run `ollama pull llama3.2` and come back</Text>
+          <Text dimColor> — ollama needs no key</Text>
         </Text>
         <List
           rows={state.providers.map((provider) => ({
             key: provider.id,
             label: provider.label,
-            note: provider.id,
+            note: provider.localOnly === true ? "no key" : provider.id,
           }))}
           cursor={state.cursor}
           empty="no providers found"
         />
-        <KeyUrl url={state.providers[state.cursor]?.keyUrl} />
+        <KeyUrl url={currentKeyUrl(state)} />
         <Footer hint="↑/↓ choose · Enter continue · Ctrl+C skip" />
       </Box>
     );

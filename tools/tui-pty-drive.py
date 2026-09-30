@@ -46,6 +46,15 @@ import time
 ROWS = 30
 COLS = 100
 QUIT_SECONDS = 1.5
+
+# Pause between keystrokes, in seconds.
+#
+# Long enough for a repaint to land on a real terminal, short enough that a
+# six-step flow does not turn the suite into a minute of sleeping. 0.45s is
+# about what a person takes to glance at a screen and decide the next key; less
+# than that and the TUI has usually not finished rendering the screen whose
+# handler you are about to hit.
+KEY_GAP = 0.45
 # Bounded, because a check that can hang is a check nobody runs, and because
 # eight assertions at forty seconds each is a suite nobody waits for.
 HARD_LIMIT = 18.0
@@ -77,21 +86,36 @@ NAMED = {
 
 
 def parse_keys(spec):
-    """Turn the spec into the bytes to write to the pty master."""
+    """Turn the spec into the list of keystrokes to write to the pty master.
+
+    A list, not one blob, and that is the whole point.
+
+    Written as a single `os.write` the keys arrive in one burst, and a TUI built
+    on React coalesces the state updates: the process sees the last key, the
+    intermediate screens never exist, and the recording shows a screen that was
+    only ever on screen for a few milliseconds - if at all. That is fine for a
+    one-key probe like `/help`. It is useless for first-run setup, where the flow
+    is pick a provider, type a key, confirm, and every step depends on the one
+    before it having been rendered.
+
+    So each keystroke is written separately, with the caller giving the TUI time
+    to paint in between. What a person does is press Enter, wait to see the next
+    screen, then press Enter again.
+    """
     if spec.strip() in ("", "none"):
-        return b""
-    out = bytearray()
+        return []
+    out = []
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
         if part.startswith("type:"):
-            out += part[len("type:") :].encode("utf-8")
+            out.append(part[len("type:") :].encode("utf-8"))
         elif part in NAMED:
-            out += NAMED[part]
+            out.append(NAMED[part])
         else:
             raise SystemExit(f"unknown key {part!r}; try one of {sorted(NAMED)} or type:<text>")
-    return bytes(out)
+    return out
 
 
 def set_winsize(fd, rows, cols):
@@ -192,7 +216,8 @@ def run_once(repo, out_path, keys, provision, hard_limit):
     deadline = time.time() + hard_limit
     started = time.time()
     send_at = quit_at = None
-    sent = quit = False
+    sent_count = 0
+    quit = False
 
     try:
         while time.time() < deadline:
@@ -213,14 +238,22 @@ def run_once(repo, out_path, keys, provision, hard_limit):
                     # keys you typed and nothing else - which reads as a broken
                     # interface and is really a race in the harness.
                     send_at = time.time() + 0.6
-                    quit_at = send_at + QUIT_SECONDS
+                    # Not armed yet. `quit_at` is set once the last keystroke has
+                    # gone out, so a six-step flow is not cut off while it is
+                    # still being typed.
                 continue
 
             now = time.time()
-            if not sent and send_at is not None and now >= send_at:
-                if keys:
-                    os.write(master, keys)
-                sent = True
+            if sent_count < len(keys) and send_at is not None and now >= send_at:
+                # One keystroke per tick of the send schedule, not one burst.
+                # `KEY_GAP` is the pause a person takes to see the screen change
+                # before pressing the next key, and a TUI that has not repainted
+                # has not yet installed the handler for the next screen.
+                os.write(master, keys[sent_count])
+                sent_count += 1
+                send_at = now + KEY_GAP
+                if sent_count >= len(keys):
+                    quit_at = send_at + QUIT_SECONDS
             if not quit and quit_at is not None and now >= quit_at:
                 # Ctrl+D is the single-press quit, so the two-press gesture under
                 # test is not the one used to end the run.

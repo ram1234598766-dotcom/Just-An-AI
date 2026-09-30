@@ -1562,6 +1562,36 @@ stacked, so you can see both where to type and what just happened.
          every run. A check that is only reliable on an idle machine is a check
          that gets deleted, so it has its own config, script and CI step.
 
+- [x] **First run could be completed and then stranded. Enter on the key bar
+      stored the key, printed "using OpenAI", and never released the screen.**
+      `Shell` swaps in the chat only when `SetupScreen` calls `onDone`, and the
+      `enter-key` branch of the input handler called `confirmKey` without
+      calling it - the list branch above it did, which is why the local-model
+      path worked and the key path did not. The reported symptom was "chatting
+      does not work even after giving an API key": the key was written correctly,
+      nothing errored, and the screen showed a success message with no way past
+      it. Now covered by a test that drives the real keystroke sequence and
+      asserts `onDone` fired, which is the only version of this test that would
+      have caught it.
+
+- [x] **Ollama was invisible unless you had already succeeded at using it.**
+      The provider list was filtered with `localOnly !== true`, so the one
+      option that needs no account, no key and no money was the one you could
+      not see. It was reachable only through the `choose-local` step, which needs
+      Ollama's `/api/tags` to have answered - so it was missing for anyone with
+      nothing pulled, and for anyone whose probe lost the race against a 1.5s
+      timeout on a slow boot. The two people most likely to be setting jaa up for
+      the first time. Ollama is now a row in the list marked "no key", it goes to
+      the model list rather than to a key bar, it shows no signup URL, the empty
+      model list names `ollama serve` and `ollama pull llama3.2`, and Esc steps
+      back out instead of dropping the session.
+
+      Verifying it also turned up a limit in the harness: the pty driver wrote
+      every keystroke in a single `os.write`, so a multi-step flow arrived as one
+      burst and React coalesced the intermediate screens. Fine for `/help`,
+      useless for first-run setup, which is the flow that was broken. It now
+      sends one keystroke per 0.45s - roughly what a person takes to glance at a
+      screen before pressing the next key.
 - [x] **Splash - the idle screen is a brand moment, and it reports real numbers.**
       `src/tui/splash.tsx` draws a framed `JAA` wordmark with a
       `JUST-AN-AI` line, a context gauge, and top and bottom status rows, shown
@@ -1591,20 +1621,29 @@ stacked, so you can see both where to type and what just happened.
       read. The durable fix is to move it to a fixture that is large enough to be
       realistic and small enough to be fast, which is Phase 30's provider-double
       work applied to the language-server harness.
-- [ ] **L4 - The real-language-server probes compete for the machine.** The
-      `lsp-servers` suite starts five real servers — typescript-language-server,
-      pyright, clangd, gopls and a JDT LS JVM — and they index while forty other
-      files run. Observed on a loaded host: a different probe failing on each
-      full run, each passing alone, with the same code and the same servers.
-      That is contention, not a defect, but a suite whose failure names a
-      different victim each time is a suite people stop reading.
+- [ ] **L4 - Half fixed. The language servers have their own pool; the rest of
+      the suite is still load-sensitive on this host.**
+      **Done:** `vitest.lsp.config.ts` runs `lsp-servers` and `lsp-loop` with
+      `fileParallelism: false`, so the five real servers no longer compete with
+      thirty-eight other files, and no longer compete with each other. Nothing
+      was skipped and no assertion was weakened: 51/51, twice green.
 
-      The pty suite was already split out for exactly this reason and CI runs it
-      separately. The same treatment belongs here: extract the two real-server
-      `describe` blocks into their own files, exclude them from the default pool,
-      and give CI a step for them. Recorded as a limit rather than done quietly,
-      because a fix that is described but not landed is the thing this project
-      has been retracting all along.
+      **Still open:** the remaining pool is not clean. On this Windows host,
+      across repeated full runs, the victim moved each time - `lsp-loop`'s
+      whole-repo TypeScript probe, then `lsp-servers`' Go probe, then
+      `tui-app`'s rewind confirmation, then `bench`'s retained-stdout cap - each
+      passing alone, with the same code, and the same run going green on the
+      next attempt. Moving the language servers out narrowed it; it did not
+      remove it. Chasing the next victim is not a fix, because there is no last
+      one.
+
+      The general remedy is measured, not assumed: `npm run test:serial`
+      (`vitest run --no-file-parallelism`) is **1018/1018 green on the same
+      machine minutes after a parallel run failed a different file**. The
+      parallel pool stays the default because CI runners are not this host and
+      have been green run after run, and serialising everything would slow CI to
+      hide a property of one loaded laptop. But a green parallel run on this
+      machine is not evidence of anything, and it should not be reported as one.
 
 ---
 

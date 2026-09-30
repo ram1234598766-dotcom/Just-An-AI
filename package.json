@@ -41,7 +41,8 @@
     "prepublishOnly": "npm run check:secrets && npm run build",
     "test:dist": "npm run build && vitest run tests/dist-emit.test.ts",
     "test:tui": "vitest run --config vitest.tui.config.ts",
-    "test:lsp": "vitest run --config vitest.lsp.config.ts"
+    "test:lsp": "vitest run --config vitest.lsp.config.ts",
+    "test:serial": "vitest run --no-file-parallelism"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

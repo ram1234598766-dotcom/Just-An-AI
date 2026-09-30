@@ -8,13 +8,25 @@ export type SetupStep = "loading" | "choose-local" | "choose-provider" | "enter-
 /** How long to wait for Ollama before deciding it is not there. */
 const PROBE_TIMEOUT_MS = 1_500;
 
+/** The local provider, which needs no key and so is handled separately. */
+const LOCAL_PROVIDER = PROVIDERS.find((p) => p.localOnly === true);
+
 export interface SetupState {
   step: SetupStep;
   /** Models found on a local Ollama, newest-looking first. */
   local: LocalModel[];
   /** Index into `local` or the provider list. */
   cursor: number;
-  /** Providers that need a key, i.e. everything that is not local-only. */
+  /**
+   * Every provider, Ollama included.
+   *
+   * Ollama used to be filtered out of this list and reachable only through the
+   * `choose-local` step, which needs `/api/tags` to have answered. So Ollama was
+   * invisible to anyone running it with nothing pulled, and to anyone whose probe
+   * timed out at 1.5s on a slow boot - the two people most likely to be setting
+   * jaa up for the first time. A local option you can only reach by already
+   * having succeeded at the thing it is for is not an option.
+   */
   providers: typeof PROVIDERS;
   /** The provider whose key is being entered. */
   pending: (typeof PROVIDERS)[number] | undefined;
@@ -31,7 +43,7 @@ export function initialSetupState(): SetupState {
     step: "loading",
     local: [],
     cursor: 0,
-    providers: PROVIDERS.filter((p) => p.localOnly !== true),
+    providers: PROVIDERS,
     pending: undefined,
     key: "",
     message: "",
@@ -92,7 +104,11 @@ export function currentRowLabel(state: SetupState): string | undefined {
 /** The URL to show under the cursor, for a provider row. */
 export function currentKeyUrl(state: SetupState): string | undefined {
   if (state.step !== "choose-provider") return undefined;
-  return state.providers[state.cursor]?.keyUrl;
+  // A local provider has no key, so it has no key URL. Showing one anyway is how
+  // a row for something that needs no account ends up pointing at a signup page.
+  const provider = state.providers[state.cursor];
+  if (provider === undefined || provider.localOnly === true) return undefined;
+  return provider.keyUrl;
 }
 
 /**
@@ -111,7 +127,13 @@ export function moveCursor(state: SetupState, delta: number): SetupState {
   return { ...state, cursor, key: state.step === "enter-key" ? "" : state.key, error: undefined };
 }
 
-/** Enter on a provider row moves to the key bar. */
+/**
+ * Enter on a provider row.
+ *
+ * A local provider has no key to ask for, so choosing it goes straight to the
+ * model list rather than to a key bar. Asking for a key that will never be used
+ * is how you get an empty box that refuses every input.
+ */
 export function choose(state: SetupState): SetupState {
   if (state.step === "choose-local") {
     const model = state.local[state.cursor];
@@ -122,6 +144,10 @@ export function choose(state: SetupState): SetupState {
   if (state.step === "choose-provider") {
     const provider = state.providers[state.cursor];
     if (provider === undefined) return state;
+    if (provider.localOnly === true) {
+      // Straight into the model list, seeded with anything already pulled.
+      return { ...state, step: "choose-local", cursor: 0, key: "", error: undefined, message: "" };
+    }
     return {
       ...state,
       step: "enter-key",
@@ -153,10 +179,24 @@ export function confirmKey(state: SetupState): SetupState {
   return { ...state, step: "done", key: "", error: undefined, message: `using ${provider.label}` };
 }
 
-/** Esc: leave the key bar for the provider list. Never leaves a key behind. */
+/**
+ * Esc: leave the current step for the provider list, carrying no key with it.
+ *
+ * Applies to the key bar *and* to the model list. The model list is reachable
+ * from the provider row now, so Esc has to be able to come back from it too -
+ * otherwise "Ollama, but I have nothing pulled" is a dead end with no way out
+ * but Ctrl+C, which discards the whole session.
+ */
 export function backToProviders(state: SetupState): SetupState {
-  if (state.step !== "enter-key") return state;
-  return { ...state, step: "choose-provider", pending: undefined, key: "", error: undefined, message: "" };
+  if (state.step === "enter-key") {
+    return { ...state, step: "choose-provider", pending: undefined, key: "", error: undefined, message: "" };
+  }
+  if (state.step === "choose-local") {
+    // Come back to the local row, which is where this step was entered from.
+    const at = LOCAL_PROVIDER === undefined ? 0 : Math.max(0, PROVIDERS.indexOf(LOCAL_PROVIDER));
+    return { ...state, step: "choose-provider", cursor: at, key: "", error: undefined, message: "" };
+  }
+  return state;
 }
 
 /** Abandon setup without changing anything. */
