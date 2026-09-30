@@ -33,7 +33,8 @@ import { afterAll, describe, expect, it } from "vitest";
  */
 
 const repo = (relative: string): string => fileURLToPath(new URL(`../${relative}`, import.meta.url));
-const REPO_WSL = "/mnt/c/Users/Mrityunjay/jaa";
+/** Where the repository lives from the *driver's* point of view. */
+const REPO_FOR_DRIVER = process.platform === "win32" ? "/mnt/c/Users/Mrityunjay/jaa" : process.cwd();
 const RECORDING = repo(".tmp-tui-pty.bin");
 const RECORDING_TXT = repo(".tmp-tui-pty.bin.txt");
 
@@ -56,17 +57,19 @@ interface Drive {
 
 /** Drive the real CLI in a real pty and return what a person would see. */
 function drive(keys: string, provision: boolean): Drive {
-  const argv = [
-    "python3",
-    `${REPO_WSL}/tools/tui-pty-drive.py`,
-    REPO_WSL,
-    `${REPO_WSL}/.tmp-tui-pty.bin`,
+  // The executable is the command, not the first argument. Passing it twice
+  // makes python try to open a file called `python3`, which fails in 45
+  // milliseconds and looks like a missing driver.
+  const scriptArgs = [
+    `${REPO_FOR_DRIVER}/tools/tui-pty-drive.py`,
+    REPO_FOR_DRIVER,
+    `${REPO_FOR_DRIVER}/.tmp-tui-pty.bin`,
     keys,
     ...(provision ? ["--provision"] : []),
   ];
   const command = process.platform === "win32" ? "wsl" : "python3";
-  const args = process.platform === "win32" ? ["-d", "kali-linux", "--", ...argv] : argv;
-  const result = spawnSync(command, args, { timeout: 180_000, encoding: "utf8" });
+  const args = process.platform === "win32" ? ["-d", "kali-linux", "--", ...scriptArgs] : scriptArgs;
+  const result = spawnSync(command, args, { timeout: 300_000, encoding: "utf8" });
   if (!existsSync(RECORDING_TXT)) {
     throw new Error(`pty driver produced no recording: ${result.stderr ?? result.stdout}`);
   }
