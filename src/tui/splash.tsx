@@ -109,6 +109,16 @@ export interface SplashProps {
   budget: number;
   /** A short label for where this session is, e.g. the working directory. */
   workspace: string;
+  /**
+   * Shrink to a three-row header.
+   *
+   * The full splash is fifteen rows. On a 24-row terminal that is most of the
+   * screen, and once there is a transcript to read and a prompt to type into,
+   * the conversation is what matters - so the frame collapses and keeps only its
+   * identity. The brand does not disappear when work starts; it stops competing
+   * with the work for rows.
+   */
+  compact?: boolean;
 }
 
 /**
@@ -142,6 +152,59 @@ export function Splash(props: SplashProps): React.JSX.Element {
   const modelLabel = props.model === undefined ? "MODEL: NONE" : "MODEL: ACTIVE";
   const barColor = tone === "ok" ? THEME.ok : tone === "warn" ? THEME.warn : THEME.error;
   const bar = `┌${"█".repeat(Math.round(safe * 10)).padEnd(10, "░")}┐`;
+
+  if (props.compact === true) {
+    /*
+      Rule lengths are computed from the content either side of them, never
+      guessed. Guessed, the three rows came out 76, 82 and 74 columns wide, so
+      the right-hand border drew at a different column on every line - which
+      looks like a rendering bug rather than an arithmetic one and would have
+      survived any test that only looked for the wordmark.
+
+      Below 60 columns the full header does not fit either, and a rule clamped to
+      zero is not a narrow frame - it is an overflow. So the header sheds the
+      least load-bearing parts instead: the gauge row goes, then the tagline, and
+      what is left is the brand and whether the session is ready. The frame is
+      always exactly as wide as the terminal says it is.
+    */
+    const room = inner - 2;
+    const wide = room >= 58;
+    const roomy = room >= 40;
+    const brand = roomy ? " JAA · AI CODING AGENT " : " JAA ";
+    const stateText = ` STATUS: ${state} `;
+    const modelText = wide ? ` ${modelLabel} ` : "";
+    const usage = wide
+      ? ` ${bar} ${Math.round(safe * 100)}%  ${formatTokens(props.contextTokens)}/${formatTokens(props.budget)} `
+      : "";
+    const memory = roomy ? ` MEMORY: ${formatTokens(props.contextTokens)} ` : "";
+    const brandRule = Math.max(0, room - brand.length - stateText.length - modelText.length);
+    const usageRule = Math.max(0, room - usage.length - memory.length);
+
+    return (
+      <Box flexDirection="column" marginBottom={1}>
+        <Text>
+          <Text dimColor>{"┌"}</Text>
+          <Text color={THEME.accent} bold>
+            {brand}
+          </Text>
+          <Text dimColor>{THEME.rule.repeat(brandRule)}</Text>
+          <Text color={props.busy ? THEME.running : THEME.ok}>{stateText}</Text>
+          {modelText === "" ? null : <Text color={THEME.accent}>{modelText}</Text>}
+          <Text dimColor>{"┐"}</Text>
+        </Text>
+        {usage === "" && memory === "" ? null : (
+          <Text>
+            <Text dimColor>{"│"}</Text>
+            {usage === "" ? null : <Text color={barColor}>{usage}</Text>}
+            <Text dimColor>{THEME.rule.repeat(usageRule)}</Text>
+            {memory === "" ? null : <Text color={THEME.accent}>{memory}</Text>}
+            <Text dimColor>{"│"}</Text>
+          </Text>
+        )}
+        <Text dimColor>{"└" + THEME.rule.repeat(room) + "┘"}</Text>
+      </Box>
+    );
+  }
 
   const body: { text: string; color?: string | undefined; dim?: boolean }[] = [];
 

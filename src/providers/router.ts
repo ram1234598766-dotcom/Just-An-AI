@@ -101,15 +101,44 @@ export function resolveModel(opts?: { provider?: string; model?: string }): Reso
   return resolved;
 }
 
-/** Model defaults per provider — local-first picks are small + fast. */
+/**
+ * Model defaults per provider — local-first picks are small + fast.
+ *
+ * Every entry here has been wrong at some point, which is the argument for
+ * `replacementModel` below rather than against it. `gemini-1.5-flash` and
+ * `claude-3-5-sonnet-20241022` were both correct when written; Google and
+ * Anthropic have since retired them, and a turn that was otherwise fine died
+ * with a 404 nobody could act on.
+ *
+ * So the defaults point at models each vendor's own SDK currently documents, and
+ * when one of them is retired the loop swaps rather than stopping. Nothing here
+ * is a claim that these will keep working - it is a claim that being wrong is now
+ * cheap.
+ */
 export function defaultModelFor(providerId: string): string {
   const settings = loadSettings();
   const roleModel = settings.models.coder ?? settings.models.fast;
   if (roleModel && providerId === settings.defaultProvider) return roleModel;
+  return currentDefaultModel(providerId) ?? "llama3.2";
+}
+
+/**
+ * The model jaa uses for a provider when nothing has been configured.
+ *
+ * Split out from `defaultModelFor` so the retired-model fallback can ask "what
+ * would you use?" without re-reading config, and without being fooled by a role
+ * model that is itself the thing that just died.
+ */
+export function currentDefaultModel(providerId: string): string | undefined {
   const defaults: Record<string, string> = {
     openai: "gpt-4o-mini",
-    anthropic: "claude-3-5-sonnet-20241022",
-    google: "gemini-1.5-flash",
+    // Anthropic's current Messages API model list no longer includes the 3.5
+    // Sonnet id this used to name; the Sonnet tier is still what a mid-cost
+    // default should be.
+    anthropic: "claude-sonnet-4-6",
+    // Google's own codegen guidance lists 1.5 as prohibited. The 2.5 series is
+    // the stable one; the 3.x models are all preview.
+    google: "gemini-2.5-flash",
     groq: "llama-3.1-8b-instant",
     deepseek: "deepseek-chat",
     mistral: "mistral-small-latest",
@@ -118,7 +147,22 @@ export function defaultModelFor(providerId: string): string {
     azure: "gpt-4o-mini",
     ollama: "llama3.2",
   };
-  return defaults[providerId] ?? "llama3.2";
+  return defaults[providerId];
+}
+
+/**
+ * The model to use after one has been reported as gone, or undefined if there is
+ * nothing better to try.
+ *
+ * Undefined when the dead model already *is* the current default: retrying it
+ * would send the same request and fail identically, and a second 404 costs a
+ * round trip and teaches nobody anything. In that case the error is the honest
+ * answer, and the message says which setting to change.
+ */
+export function replacementModel(providerId: string, dead: string): string | undefined {
+  const current = currentDefaultModel(providerId);
+  if (current === undefined || current === dead) return undefined;
+  return current;
 }
 
 export { PROVIDERS };

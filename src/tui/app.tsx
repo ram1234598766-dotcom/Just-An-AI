@@ -174,8 +174,63 @@ interface ConfirmState {
   dropped: number;
 }
 
+/**
+ * A provider failure, as something a person can read and act on.
+ *
+ * The SDKs hand back the parsed error body, so the default rendering was a
+ * single line of JSON: `loop failed: {"error":{"code":404,"message":"models/
+ * gemini-1.5-flash is not found for API version v1beta, or is not supported
+ * for generateContent. Call ModelService.ListModels to see the list...`. It
+ * names the problem somewhere inside a hundred characters of punctuation, and
+ * its most useful sentence is advice addressed to a developer.
+ *
+ * So the message is dug out, the advice is dropped, and what is left is the
+ * sentence a person can act on. The full payload is not shown at all: jaa has
+ * nothing to add to it, and it is the reason the turn looked like it had failed
+ * for a reason nobody could find.
+ */
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  const raw = err instanceof Error ? err.message : String(err);
+  const message = extractProviderMessage(raw);
+  if (message === undefined) return clip(raw.replace(/\s+/g, " ").trim(), 160);
+  const advice = message.replace(/\s*Call\s+\w[\w.]*\.\w+\s+to see.*$/i, "").trim();
+  const trimmed = advice.length > 0 ? advice : message;
+  return clip(
+    trimmed.replace(/\s+/g, " ").trim(),
+    200,
+  );
+}
+
+/** The human sentence inside a provider error body, if there is one. */
+function extractProviderMessage(raw: string): string | undefined {
+  // A JSON body: dig for the first `message` string, at any depth, without
+  // assuming which SDK shaped it.
+  const brace = raw.indexOf("{");
+  if (brace >= 0) {
+    try {
+      const found = findFirstMessage(JSON.parse(raw.slice(brace)) as unknown);
+      if (found !== undefined) return found;
+    } catch {
+      // Not JSON after all; fall through to the text handling below.
+    }
+  }
+  // A bare sentence with the shape providers use for a missing model.
+  const bare = /\bmodels?\/[A-Za-z0-9._:\-]+ is not found\b[^"]*?/i.exec(raw);
+  if (bare?.[0] !== undefined) return bare[0];
+  return undefined;
+}
+
+/** Depth-first search for the first `message` that is a non-empty string. */
+function findFirstMessage(node: unknown, depth = 0): string | undefined {
+  if (depth > 6 || typeof node !== "object" || node === null) return undefined;
+  const record = node as Record<string, unknown>;
+  const message = record["message"];
+  if (typeof message === "string" && message.trim() !== "") return message;
+  for (const value of Object.values(record)) {
+    const found = findFirstMessage(value, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 /**
@@ -564,6 +619,26 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
           // works, just without the effect.
           onStreamDelta: (delta) => {
             appendDelta(delta);
+          },
+          /*
+            A retired model is swapped for the provider's current default, and
+            the swap is announced in the transcript rather than only in the
+            status line.
+
+            Silently changing which model is answering is not acceptable: someone
+            who deliberately configured a model has been given a different one
+            without being told, and the bill will say so. A transcript row is the
+            only place they will definitely look, and it survives scrolling past
+            the status line.
+          */
+          onModelRetired: (dead, replacement) => {
+            addLines([
+              [
+                "notice",
+                `${dead} is no longer available — using ${replacement} for this turn. ` +
+                  `Set it back with: jaa config set models.coder ${replacement}`,
+              ],
+            ]);
           },
           // A turn whose stream died is re-run, and the retry is announced as a
           // replacement. Without this the transcript would read the partial text
@@ -1111,24 +1186,28 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
   return (
     <Box flexDirection="column">
       {/*
-        The splash, and only while the transcript is empty.
+        The splash, and it does not leave.
 
-        It goes above the status bar rather than instead of it, because the status
-        bar is telemetry someone watches for the whole session and the splash is a
-        first impression. Collapsing them would mean the telemetry had to be
-        re-specified inside the splash, and the first thing to break would be a
-        number nobody was looking at.
+        Full while the transcript is empty, because that is the first impression
+        and there is nothing else on screen to compete with. Collapsed to a
+        three-row header once there is a conversation, because at 24 rows the
+        fifteen-row splash and a transcript cannot both fit and the conversation
+        is what matters.
+
+        It sits above the status bar rather than instead of it: the status bar is
+        telemetry someone watches all session, the splash is identity. Collapsing
+        them would mean re-specifying the telemetry inside the splash, and the
+        first thing to break would be a number nobody was looking at.
       */}
-      {lines.length === 0 && !busy ? (
-        <Splash
-          columns={process.stdout.columns ?? 80}
-          busy={busy}
-          model={props.model.model}
-          contextTokens={contextTokens}
-          budget={props.tokenBudget ?? 32_000}
-          workspace={basename(process.cwd())}
-        />
-      ) : null}
+      <Splash
+        columns={process.stdout.columns ?? 80}
+        busy={busy}
+        model={props.model.model}
+        contextTokens={contextTokens}
+        budget={props.tokenBudget ?? 32_000}
+        workspace={basename(process.cwd())}
+        compact={lines.length > 0}
+      />
       <StatusBar
         provider={props.model.provider}
         model={props.model.model}

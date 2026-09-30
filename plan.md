@@ -1592,6 +1592,34 @@ stacked, so you can see both where to type and what just happened.
       useless for first-run setup, which is the flow that was broken. It now
       sends one keystroke per 0.45s - roughly what a person takes to glance at a
       screen before pressing the next key.
+- [x] **The pty suite was failing for two reasons that had nothing to do with the
+      TUI, and both of them read as "the interface is broken".**
+      Worth writing down because the whole cost of this was a debugging session
+      chasing the wrong layer.
+
+      **A CRLF shebang.** `tools/tui-pty-drive.py` is exec'd through
+      `#!/usr/bin/env python3`. A working-tree CRLF checkout makes that
+      `python3\r`, and Linux answers `env: 'python3\r': No such file or
+      directory` - which reads exactly like a missing interpreter. The suite
+      failed 3/3 while the TypeScript under test was demonstrably fine, which is
+      the worst possible combination: a red gate and a working product. There is
+      now a `.gitattributes` pinning `*.py` and `*.sh` to LF, so a Windows
+      checkout cannot produce a file that cannot be run.
+
+      **A hard limit below the cold start.** The driver's `HARD_LIMIT` was 18
+      seconds. Measured, the chat screen takes **28.8 seconds** from spawn to
+      first paint on this host, because node is loaded off `/mnt/c` - a Windows
+      9p mount - through WSL. So the driver declared the recording empty, killed
+      a child that was about to paint, and retried into the same wall: three
+      attempts, three empty recordings, no information. Raised to 90s with
+      `RETRIES` cut to 2 so the worst case still fits the suite's 300s timeout.
+      The suite now takes ~150s instead of ~80s, which is the honest price of
+      not killing a healthy process.
+
+      Both were found by writing a throwaway pty runner to compare against the
+      driver. The driver said the TUI rendered nothing; the runner said 2081
+      bytes of correct screen. Only one of them was wrong, and it was not the one
+      reporting the failure.
 - [x] **Splash - the idle screen is a brand moment, and it reports real numbers.**
       `src/tui/splash.tsx` draws a framed `JAA` wordmark with a
       `JUST-AN-AI` line, a context gauge, and top and bottom status rows, shown

@@ -1,0 +1,16 @@
+# Python is exec'd, not just read.
+#
+# tools/tui-pty-drive.py runs under WSL on Windows and is invoked through its
+# shebang. A CRLF checkout turns line 1 into `#!/usr/bin/env python3\r`, and
+# Linux then reports:
+#
+#   env: 'python3\r': No such file or directory
+#
+# Which reads exactly like a missing interpreter and cost a full debugging
+# session chasing the wrong thing - the pty suite failing three times while the
+# TypeScript under test was demonstrably fine. Pinning LF means a Windows
+# checkout cannot produce a Python file that cannot be run.
+*.py text eol=lf
+
+# Shell scripts, same reason: a CRLF shebang is a `not found` on any POSIX host.
+*.sh text eol=lf

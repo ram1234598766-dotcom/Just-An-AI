@@ -57,15 +57,30 @@ QUIT_SECONDS = 1.5
 KEY_GAP = 0.45
 # Bounded, because a check that can hang is a check nobody runs, and because
 # eight assertions at forty seconds each is a suite nobody waits for.
-HARD_LIMIT = 18.0
+#
+# Measured, not guessed. The first paint of the chat screen on this host takes
+# **28.8 seconds** from spawn to first byte: node has to be loaded off /mnt/c, a
+# Windows 9p mount, through WSL. This was 18.0, so the driver declared the
+# recording empty, killed a child that was about to paint, and then retried into
+# exactly the same wall - three attempts, three empty recordings, and a
+# three-failing suite that said nothing whatever about the interface.
+#
+# It is worth being precise about how that failure lies: the child was still
+# alive and healthy, and the driver killed it mid-boot. A 0-byte recording here
+# means "I did not wait long enough", not "the TUI drew nothing".
+#
+# Ninety seconds clears the measured 28.8s with room for a slower day, and
+# RETRIES is 2 rather than 3 so the worst case (180s) still fits inside the
+# 300s the pty suite's own testTimeout allows.
+HARD_LIMIT = 90.0
 FIRST_FRAME_BYTES = 80
 # Long enough for a cold start to finish booting WSL and loading node, and short
-# enough that the suite is not the slowest thing anyone runs. Three attempts
-# rather than one: the first `node` load comes off /mnt/c, a Windows 9p mount,
-# and is markedly slower than every one after it. The failure is a known, bounded
-# environment cost rather than a property of the interface, so it is retried and
-# then still reported.
-RETRIES = 3
+# enough that the suite is not the slowest thing anyone runs. Two attempts rather
+# than one, because the first `node` load off the 9p mount is markedly slower
+# than every one after it. The failure is a known, bounded environment cost
+# rather than a property of the interface, so it is retried and then still
+# reported.
+RETRIES = 2
 
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|\r")
 

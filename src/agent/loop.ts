@@ -45,6 +45,8 @@ import { buildPayload } from "../hooks/run.js";
 import { DEFAULT_TIMEOUTS } from "../hooks/types.js";
 import { askOnTty, sanitizeForDisplay, SessionGrants } from "../permissions/ask.js";
 import { MUTATING_TOOLS } from "../permissions/rules.js";
+import { isMissingModelError } from "../providers/model-errors.js";
+import { replacementModel } from "../providers/router.js";
 import type { HookChainResult } from "../hooks/decide.js";
 import type { HookEvent } from "../hooks/events.js";
 import type { HookGroup, HookPayload, HookTimeouts, ValidatedHookEntry } from "../hooks/types.js";
@@ -204,6 +206,15 @@ export interface AgentLoopOptions {
    * append path stays trivially correct.
    */
   onStreamReplace?: (text: string) => void;
+  /**
+   * Fired when a provider rejects the model as gone and the loop retires it.
+   *
+   * `dead` is the model that was asked for and `replacement` is what answered
+   * instead. It fires at most once per turn, and never for an error that is not
+   * about a model - so a host can put this in front of a person without
+   * filtering it.
+   */
+  onModelRetired?: (dead: string, replacement: string) => void;
   /** Fired before a tool call is executed. */
   onToolCall?: (call: ToolCall) => void;
   /** Fired after a tool call resolves (ok=false means the executor threw). */
@@ -332,10 +343,13 @@ async function drive(
     if (options.temperature !== undefined) request.temperature = options.temperature;
     if (options.numContext !== undefined) request.numContext = options.numContext;
 
-    const response =
-      options.onStreamDelta !== undefined && options.model.adapter.stream !== undefined
-        ? await chatStreaming(request, options.model.adapter, options.onStreamDelta, options.onStreamReplace)
-        : await options.model.adapter.chat(request);
+    const response = await callWithModelFallback(
+      request,
+      options.model,
+      options.onStreamDelta !== undefined ? options.onStreamDelta : undefined,
+      options.onStreamReplace,
+      options.onModelRetired,
+    );
     inputTokens += response.usage.inputTokens;
     outputTokens += response.usage.outputTokens;
 
@@ -433,6 +447,47 @@ type BoundRecorder = (toolName: string, toolCallId: string, turn: number, args: 
  *     fragments the caller was shown, in order, so the painted text and the
  *     stored text cannot disagree.
  */
+/**
+ * Make the call, and if the provider says the model is gone, make it once more
+ * with a model that is known to exist.
+ *
+ * This is the fix for a whole class of outage rather than for one dead model
+ * name. `gemini-1.5-flash` and `claude-3-5-sonnet-20241022` were both correct
+ * when they were written and both are now rejected; each ended a turn with a
+ * 404 payload in the transcript and no way forward that did not involve looking
+ * up a model name. Retiring the model in place keeps the session alive and says
+ * what it did, so the operator can correct the setting afterwards.
+ *
+ * It rewrites the model for this loop only. Nothing is persisted: writing the
+ * new name to the config would be a silent edit of someone's deliberate choice,
+ * on the strength of a 404 that could also mean a bad endpoint.
+ */
+async function callWithModelFallback(
+  request: ChatRequest,
+  model: ResolvedModel,
+  onDelta: ((delta: string) => void) | undefined,
+  onReplace: ((text: string) => void) | undefined,
+  onRetired: ((dead: string, replacement: string) => void) | undefined,
+): Promise<ChatResponse> {
+  const streaming = onDelta !== undefined && model.adapter.stream !== undefined;
+  try {
+    return streaming
+      ? await chatStreaming(request, model.adapter, onDelta, onReplace)
+      : await model.adapter.chat(request);
+  } catch (err) {
+    if (!isMissingModelError(err)) throw err;
+    const dead = request.model;
+    const replacement = replacementModel(model.provider, dead);
+    if (replacement === undefined) throw err;
+    onRetired?.(dead, replacement);
+    // No streaming on the retry. The first attempt may already have painted
+    // something, and a stream replaced mid-flight *after* announcing that a
+    // different model is answering is more confusing than one complete answer.
+    if (onReplace !== undefined) onReplace("");
+    return await model.adapter.chat({ ...request, model: replacement });
+  }
+}
+
 async function chatStreaming(
   request: ChatRequest,
   adapter: ProviderAdapter,
