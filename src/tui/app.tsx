@@ -13,6 +13,7 @@ import { estimateMessageTokens } from "../agent/budget.js";
 import { clip, expandMarkdown, formatTokens, formatToolCall, linesFromMessages, summarize, toolResultBody } from "./render.js";
 import { COMMANDS, deleteToStart, deleteWordBack, helpText, isCommand, isKnownCommand, matchingCommands, parseCommand, walkHistory } from "./commands.js";
 import { LineView, StatusBar } from "./components.js";
+import { Splash } from "./splash.js";
 import { SetupScreen } from "./setup.js";
 import type { Line, LineKind } from "./render.js";
 import type { Skill } from "../skills/types.js";
@@ -1109,6 +1110,25 @@ export function ChatApp(props: ChatAppProps): React.JSX.Element {
 
   return (
     <Box flexDirection="column">
+      {/*
+        The splash, and only while the transcript is empty.
+
+        It goes above the status bar rather than instead of it, because the status
+        bar is telemetry someone watches for the whole session and the splash is a
+        first impression. Collapsing them would mean the telemetry had to be
+        re-specified inside the splash, and the first thing to break would be a
+        number nobody was looking at.
+      */}
+      {lines.length === 0 && !busy ? (
+        <Splash
+          columns={process.stdout.columns ?? 80}
+          busy={busy}
+          model={props.model.model}
+          contextTokens={contextTokens}
+          budget={props.tokenBudget ?? 32_000}
+          workspace={basename(process.cwd())}
+        />
+      ) : null}
       <StatusBar
         provider={props.model.provider}
         model={props.model.model}

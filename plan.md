@@ -115,7 +115,7 @@ top of the list is closed would misrepresent how much each one costs.
 | 17 | Live code intelligence (LSP in the loop) | `b6d2a37` | **done** (1 known limit, 2 claims retracted) |
 | 18 | Compatibility and interop layer | - | planned |
 | 19 | Plugin system and registry | - | planned |
-| 20 | The TUI, first-run setup, and making it the default | `c1476db`, `4f839ec` | **done** (3 open limits; L1 closed in a real pty) |
+| 20 | The TUI, first-run setup, splash, and making it the default | `c1476db`, `4f839ec` | **done** (3 open limits; L1 closed in a real pty) |
 | 21 | Streaming on every adapter | - | **next** |
 | 22 | Live theme reload + a proper config surface | - | planned |
 | 23 | Diff review in the TUI | - | planned |
@@ -1562,6 +1562,17 @@ stacked, so you can see both where to type and what just happened.
          every run. A check that is only reliable on an idle machine is a check
          that gets deleted, so it has its own config, script and CI step.
 
+- [x] **Splash - the idle screen is a brand moment, and it reports real numbers.**
+      `src/tui/splash.tsx` draws a framed `JAA` wordmark with a
+      `JUST-AN-AI` line, a context gauge, and top and bottom status rows, shown
+      only while the transcript is empty. Every value on it is read from the live
+      app: the gauge is the real ratio, the model is the resolved model, memory is
+      the real token count. It falls back to a text wordmark below 56 columns and
+      renders nothing below 44, because a splash that wraps in a split pane turns
+      the session into ragged fragments. Depth comes from a dim ramp down the
+      letter rows rather than a drop shadow - an offset shadow behind letters that
+      dense doubles every stroke and the word stops being readable, which is the
+      one thing a wordmark has to be. Verified in a real 100x30 pty.
 - [ ] **L2 - Only the OpenAI-compatible adapter streams.** `ChatStreamChunk`
       exists on the adapter interface and the Anthropic, Google and Ollama
       adapters do not implement it yet, so those get the non-streaming path and

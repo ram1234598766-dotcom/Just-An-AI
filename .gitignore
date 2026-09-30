@@ -22,6 +22,14 @@ logs/
 *.db
 *.sqlite
 
+# --- pty harness artifacts ---
+# The pty driver runs the real CLI against a throwaway JAA_HOME and a recording
+# file. `tests/tui-pty.test.ts` cleans both up itself, but a manual run - or a
+# run that was interrupted - leaves a `config.json` that looks exactly like a
+# file someone meant to commit.
+.pty-home/
+.tmp-tui-pty*
+
 # --- Editor / OS ---
 .vscode/
 .idea/
