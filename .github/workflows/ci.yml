@@ -62,5 +62,18 @@ jobs:
       - name: Audit
         run: npm audit --audit-level=high
 
+      # Its own step, with the build already done.
+      #
+      # A pty test needs a real terminal and twenty seconds of uncontended CPU.
+      # Run inside the main pool it failed against a different neighbour each
+      # time, and a check that is only reliable on an idle machine is a check
+      # that gets deleted. So it runs alone.
+      #
+      # On ubuntu-latest there is no WSL, so the pty is used directly - which is
+      # the cheaper path anyway, and is why the driver is Python rather than
+      # something Windows-specific.
+      - name: The TUI in a real pty
+        run: CI=1 npm run test:tui
+
       - name: Package contents are the declared whitelist
         run: npm run pack:dryrun

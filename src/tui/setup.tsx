@@ -239,7 +239,9 @@ function Footer({ hint, masked = false }: { hint: string; masked?: boolean }): R
       <Text dimColor>{"  " + RULE}</Text>
       <Text dimColor>{"  " + hint}</Text>
       {masked ? <Text dimColor>{"  stored in your keyring, never printed, never sent anywhere but the provider"}</Text> : null}
-      <Text dimColor>{"  theme: " + ACTIVE_THEME_NAME} +`n        {"  ·  jaa config set ui.theme <" + THEME_NAMES.join("|") + ">"}</Text>
+      <Text dimColor>
+        {"  theme: " + ACTIVE_THEME_NAME + "  ·  jaa config set ui.theme <" + THEME_NAMES.join("|") + ">"}
+      </Text>
     </Box>
   );
 }

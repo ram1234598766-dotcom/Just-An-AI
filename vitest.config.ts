@@ -3,7 +3,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["tests/**/*.test.{ts,tsx}"],
+    // Excluded: these need a pty and a WSL start, and asking for twenty seconds
+    // of uncontended terminal time inside a pool running forty other files gave a
+    // different victim every run. They run on their own - `npm run test:tui`.
+    exclude: ["tests/tui-pty.test.ts", "**/node_modules/**", "**/dist/**"],
     reporters: ["default"],
     passWithNoTests: false,
     /**
