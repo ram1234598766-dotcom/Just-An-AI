@@ -6,7 +6,21 @@ export default defineConfig({
     // Excluded: these need a pty and a WSL start, and asking for twenty seconds
     // of uncontended terminal time inside a pool running forty other files gave a
     // different victim every run. They run on their own - `npm run test:tui`.
-    exclude: ["tests/tui-pty.test.ts", "**/node_modules/**", "**/dist/**"],
+    //
+    // Excluded for a second, different reason: these two start five real language
+    // servers between them and index real projects while thirty-eight other files
+    // run. Observed on a loaded host as a different probe failing on each full
+    // run - the TypeScript one, then the Go one - each passing alone, with
+    // identical code and identical servers. Contention, not a defect, but a suite
+    // that names a different victim each time is a suite people stop reading.
+    // They run on their own - `npm run test:lsp`.
+    exclude: [
+      "tests/tui-pty.test.ts",
+      "tests/lsp-servers.test.ts",
+      "tests/lsp-loop.test.ts",
+      "**/node_modules/**",
+      "**/dist/**",
+    ],
     reporters: ["default"],
     passWithNoTests: false,
     /**

@@ -40,7 +40,8 @@
     "pack:dryrun": "npm pack --dry-run",
     "prepublishOnly": "npm run check:secrets && npm run build",
     "test:dist": "npm run build && vitest run tests/dist-emit.test.ts",
-    "test:tui": "vitest run --config vitest.tui.config.ts"
+    "test:tui": "vitest run --config vitest.tui.config.ts",
+    "test:lsp": "vitest run --config vitest.lsp.config.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
