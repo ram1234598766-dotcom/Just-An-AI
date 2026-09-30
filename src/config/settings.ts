@@ -49,6 +49,16 @@ export const settingsSchema = z.object({
     })
     .default({}),
   /**
+   * How the interface looks and behaves. Absent means the defaults, so a config
+   * written before this block existed still loads.
+   */
+  ui: z
+    .object({
+      /** A name from the built-in themes, or omitted for the default. */
+      theme: z.string().min(1).optional(),
+    })
+    .default({}),
+  /**
    * Permission rules. Validated here rather than at call time so a typo fails
    * on load with a path-qualified error instead of silently never matching.
    */
@@ -65,6 +75,7 @@ const pathValidators: Record<string, z.ZodType<unknown>> = {
   "models.fast": z.string().min(1),
   "models.reasoning": z.string().min(1),
   "permissions.mode": z.enum(["suggest", "auto-edit", "full-auto"]),
+  "ui.theme": z.string().min(1),
 };
 
 export function configPath(): string {
@@ -72,7 +83,12 @@ export function configPath(): string {
 }
 
 export function defaultSettings(): Settings {
-  return { ollamaBaseUrl: "http://localhost:11434", models: {}, permissions: { mode: "suggest", allow: [], deny: [] } };
+  return {
+    ollamaBaseUrl: "http://localhost:11434",
+    models: {},
+    ui: {},
+    permissions: { mode: "suggest", allow: [], deny: [] },
+  };
 }
 
 export interface SettingsLoadIssue {

@@ -67,6 +67,15 @@ describe("lsp: platform-safe command resolution", () => {
 
   it("refuses an unresolvable command instead of falling back to a shell", () => {
     // The whole point: `cmd /c` would work and would be an injection vector.
+    //
+    // Windows only, and the reason is that POSIX needs no resolution at all —
+    // `spawn` searches `PATH` itself and takes a real argv, so `resolveSpawn`
+    // returns the command untouched and there is nothing to refuse. The
+    // security property it protects is asserted platform-independently by the
+    // "never puts an argument through a shell" test beside this one; what is
+    // Windows-specific is *where* the refusal happens, and only there does it
+    // throw. Asserting it everywhere would be asserting that POSIX is broken.
+    if (process.platform !== "win32") return;
     expect(() => resolveSpawn("definitely-not-a-real-binary-xyz-123", [])).toThrow(SpawnResolutionError);
     expect(() => resolveSpawn("definitely-not-a-real-binary-xyz-123", [])).toThrow(/does not fall back to a shell/);
   });
@@ -118,9 +127,26 @@ describe("lsp: document URI normalisation", () => {
   it("collapses the spellings a server actually sends", () => {
     // Observed on this host: the client sends the second form and the server
     // echoes the first. Keying a map on the raw string loses every publish.
-    const a = normalizeUri("file:///c%3A/Users/x/src/a.ts");
-    const b = normalizeUri("file:///C:/Users/x/src/a.ts");
-    expect(a).toBe(b);
+    //
+    // Windows only for the *case* half, because the drive letter is what varies
+    // and `/c` and `/C` are different directories on a case-sensitive
+    // filesystem. Collapsing them on Linux would merge two genuinely different
+    // files, which is a bug of its own.
+    const encoded = normalizeUri("file:///c%3A/Users/x/src/a.ts");
+    const plain = normalizeUri("file:///C:/Users/x/src/a.ts");
+    // The percent-encoded colon decodes on every platform: that is a URI detail,
+    // not a path detail.
+    expect(encoded).toContain("file:///c:");
+    if (process.platform === "win32") {
+      // Windows folds case for the whole URI, so the two spellings collapse.
+      expect(encoded).toBe("file:///c:/users/x/src/a.ts");
+      expect(encoded).toBe(plain);
+    } else {
+      // `/c` and `/C` are different directories on a case-sensitive filesystem,
+      // so merging them there would lose one of the two files.
+      expect(encoded).toBe("file:///c:/Users/x/src/a.ts");
+      expect(encoded).not.toBe(plain);
+    }
   });
 
   it("leaves a non-file URI alone", () => {
@@ -347,7 +373,19 @@ describe.skipIf(!hasServer)("lsp: against a real language server", () => {
   it.skipIf(!hasTsserver)(
     "reports a real type error in a real file, and nothing for a clean one",
     async () => {
-      const manager = new LspManager({ root: process.cwd(), timeoutMs: 120_000 });
+      // The push wait, not the per-request deadline.
+      //
+      // This probe runs against the whole jaa repository rather than a
+      // throwaway fixture, so `tsserver` has to index every file in a real
+      // project before it publishes anything. The default wait is a few seconds
+      // and is right for a single edited file; here it expired on a loaded
+      // machine and the test reported "typescript reported: (nothing)", which
+      // reads exactly like a broken server and is not one.
+      const manager = new LspManager({
+        root: process.cwd(),
+        timeoutMs: 120_000,
+        diagnosticWaitMs: 60_000,
+      });
       const brokenFile = resolve("src/__lsp_gate_probe.ts");
       const cleanFile = resolve("src/__lsp_gate_clean.ts");
       const broken = 'export const wrong: number = "not a number";\n';

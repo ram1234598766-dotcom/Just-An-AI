@@ -37,8 +37,15 @@ describe("published tarball", () => {
 
   it("actually contains what it claims", () => {
     // The list is not a promise on its own; the files have to exist.
+    //
+    // `dist` is excluded because it is a build artifact, not a source file: CI
+    // runs `tsc --noEmit` before the suite and never writes `dist/`, so
+    // asserting it exists would fail every run on a clean checkout. Its
+    // presence is the build's job, checked by the build step.
     const pkgJson = JSON.parse(readFileSync(repoFile("package.json"), "utf8")) as { files: string[] };
+    const buildOutputs = new Set(["dist"]);
     for (const entry of pkgJson.files) {
+      if (buildOutputs.has(entry)) continue;
       expect(existsSync(repoFile(entry)), `declared in "files" but absent: ${entry}`).toBe(true);
     }
   });

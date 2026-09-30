@@ -8,6 +8,29 @@ import type { ChatStreamChunk, ProviderAdapter, ResolvedModel } from "../src/pro
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Wait for `ready` to hold, polling until a deadline.
+ *
+ * Time-bounded rather than iteration-bounded on purpose. This suite runs
+ * alongside 37 other files, several of which spawn real language servers, so a
+ * poll count is a race that loses on a loaded machine — which is exactly how
+ * three of these tests failed in a full run while passing alone. A wall-clock
+ * budget scales with how slow the machine is instead of against it.
+ */
+async function waitFor(ready: (frame: string) => boolean, what: string, timeoutMs = 20_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let frame = "";
+  while (Date.now() < deadline) {
+    await delay(25);
+    frame = lastFrameRef() ?? "";
+    if (ready(frame)) return frame;
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for: ${what}\n--- last frame ---\n${frame}`);
+}
+
+/** Set once per test, so `waitFor` can read the current frame. */
+let lastFrameRef: () => string | undefined = () => undefined;
+
 /** A model that streams, so the TUI's streaming path is what is under test. */
 function streamingModel(chunks: string[], usage?: { inputTokens: number; outputTokens: number }): ResolvedModel {
   const adapter: ProviderAdapter = {
@@ -66,25 +89,19 @@ describe("streaming assistant output", () => {
       />,
     );
     try {
+      lastFrameRef = lastFrame;
       stdin.write("hi");
       await delay(50);
       stdin.write("\r");
-      // Poll until the first fragment lands rather than guessing a delay: the
-      // assertion is that text appears *during* the stream, and a fixed sleep
-      // either races the stream or measures the machine, not the behaviour.
-      let partial = "";
-      for (let attempt = 0; attempt < 40; attempt++) {
-        await delay(15);
-        partial = lastFrame() ?? "";
-        if (partial.includes("Hello")) break;
-      }
-      expect(partial, "no streamed text appeared while the stream was still running").toContain("Hello");
+      // Wait for the first fragment rather than guessing a delay: the assertion
+      // is that text appears *during* the stream, and a fixed sleep either races
+      // the stream or measures the machine, not the behaviour.
+      const partial = await waitFor((f) => f.includes("Hello"), "the first streamed fragment");
+      expect(partial).toContain("Hello");
       // Not the whole reply yet, which is what makes it streaming rather than a
       // fast non-streaming call.
       expect(partial).not.toContain("Hello there, world");
-      await delay(500);
-      const complete = lastFrame() ?? "";
-      expect(complete).toContain("Hello there, world");
+      const complete = await waitFor((f) => f.includes("Hello there, world"), "the completed reply");
       // One row, not one per delta.
       expect(complete.match(/Hello there, world/g)?.length).toBe(1);
     } finally {
@@ -102,20 +119,13 @@ describe("streaming assistant output", () => {
       />,
     );
     try {
+      lastFrameRef = lastFrame;
       stdin.write("hi");
       await delay(50);
       stdin.write("\r");
-      // Polled rather than slept on: this suite runs alongside 37 other files,
-      // and a fixed wait is a race that loses on a loaded machine.
-      let frame = "";
-      for (let attempt = 0; attempt < 80; attempt++) {
-        await delay(25);
-        frame = lastFrame() ?? "";
-        if (frame.includes("turn 1")) break;
-      }
       // `onAssistantMessage` fires with the same text after the stream ends. If
       // the TUI added it as a new row the reply would appear twice.
-      expect(frame, "the turn never completed").toContain("turn 1");
+      const frame = await waitFor((f) => f.includes("turn 1"), "the turn to complete");
       expect(frame.match(/\bonce\b/g)?.length).toBe(1);
     } finally {
       unmount();
@@ -132,16 +142,11 @@ describe("streaming assistant output", () => {
       />,
     );
     try {
+      lastFrameRef = lastFrame;
       stdin.write("code please");
       await delay(50);
       stdin.write("\r");
-      let frame = "";
-      for (let attempt = 0; attempt < 80; attempt++) {
-        await delay(25);
-        frame = lastFrame() ?? "";
-        if (frame.includes("const a = 1;")) break;
-      }
-      expect(frame, "the code never rendered").toContain("const a = 1;");
+      const frame = await waitFor((f) => f.includes("const a = 1;"), "the code block to render");
       // Drawn as a block, not as prose containing fence characters.
       expect(frame).not.toContain("```");
       expect(frame).toMatch(/[╭│╰]/);
@@ -220,29 +225,18 @@ describe("tool cards", () => {
       />,
     );
     try {
+      lastFrameRef = lastFrame;
       stdin.write("read it");
       await delay(50);
       stdin.write("\r");
-      // Wait for the card to appear rather than assuming a delay, so the test
-      // is about the card's lifecycle and not about how fast this machine is.
-      let running = "";
-      for (let attempt = 0; attempt < 40; attempt++) {
-        await delay(15);
-        running = lastFrame() ?? "";
-        if (running.includes("read_file")) break;
-      }
-      expect(running, "the card never appeared").toContain("read_file");
+      // Wait for the card rather than assuming a delay, so the test is about the
+      // card's lifecycle and not about how fast this machine is.
+      const running = await waitFor((f) => f.includes("read_file"), "the card to appear");
       expect(running).toContain("running");
       expect(running).toContain("◐");
 
       release?.();
-      let done = "";
-      for (let attempt = 0; attempt < 40; attempt++) {
-        await delay(15);
-        done = lastFrame() ?? "";
-        if (done.includes("✓")) break;
-      }
-      expect(done).toContain("✓");
+      const done = await waitFor((f) => f.includes("✓"), "the card to reach a verdict");
       expect(done).toContain("the file contents");
       expect(done).toMatch(/\d+ms/);
       // The running state is gone, not left behind as a duplicate card.
@@ -463,23 +457,17 @@ describe("key bindings", () => {
       />,
     );
     try {
+      lastFrameRef = lastFrame;
       stdin.write("run it");
       await delay(50);
       stdin.write("\r");
-      let frame = "";
-      for (let attempt = 0; attempt < 40; attempt++) {
-        await delay(15);
-        frame = lastFrame() ?? "";
-        if (frame.includes("expand")) break;
-      }
-      expect(frame, "the card should offer to expand").toContain("expand");
+      const collapsed = await waitFor((f) => f.includes("expand"), "the card to offer to expand");
+      expect(collapsed).toContain("expand");
 
       stdin.write("\x12");
-      await delay(80);
-      frame = lastFrame() ?? "";
       // Expanded, and now offering to collapse again.
-      expect(frame).toContain("collapse");
-      expect(frame).toContain("lines");
+      const expanded = await waitFor((f) => f.includes("collapse"), "the card to expand");
+      expect(expanded).toContain("lines");
     } finally {
       unmount();
     }
