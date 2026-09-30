@@ -45,6 +45,20 @@ jobs:
       - name: Build
         run: npm run build
 
+      # After the build, so `dist/` exists. Runs the check that reads the
+      # *emitted* JavaScript rather than the source.
+      #
+      # This is the check that was missing when 0.1.2 shipped unable to start:
+      # `tsc` accepts a `./x.jsx` specifier for a `.tsx` source and emits it
+      # unchanged, and vitest resolves it the same forgiving way, so lint, test
+      # and build all passed on a package that could not be imported. Only
+      # `dist/` shows it, and only Node loading the built file does.
+      - name: Emitted imports resolve
+        run: CI=1 npx vitest run tests/dist-emit.test.ts
+
+      - name: The built CLI starts
+        run: node dist/cli/index.js --version
+
       - name: Audit
         run: npm audit --audit-level=high
 

@@ -12,7 +12,8 @@ import type { ChatMessage, ResolvedModel, ToolCall, ToolDef } from "../providers
 import { estimateMessageTokens } from "../agent/budget.js";
 import { clip, expandMarkdown, formatTokens, formatToolCall, linesFromMessages, summarize, toolResultBody } from "./render.js";
 import { COMMANDS, deleteToStart, deleteWordBack, helpText, isCommand, isKnownCommand, matchingCommands, parseCommand, walkHistory } from "./commands.js";
-import { LineView, StatusBar } from "./components.jsx";
+import { LineView, StatusBar } from "./components.js";
+import { SetupScreen } from "./setup.js";
 import type { Line, LineKind } from "./render.js";
 import type { Skill } from "../skills/types.js";
 import { matchSkills, skillContext } from "../skills/index.js";
@@ -1285,11 +1286,26 @@ export type StartChatOptions = Omit<ChatAppProps, "resumeMessages"> & {
    * of Ink throwing because the stream is not the one it hard-codes.
    */
   stdin?: NodeJS.ReadStream;
+  /**
+   * Set false to skip the first-run screen.
+   *
+   * For a host that has already provisioned a key, or that renders the component
+   * directly. Nothing else needs it: the screen only appears when there is
+   * genuinely nothing configured, which is the condition it is meant for.
+   */
+  setup?: boolean;
+  /**
+   * Set when the host was told which provider to use.
+   *
+   * Named distinctly from `model` because `ChatAppProps` already has a `model`
+   * that means the resolved adapter, not a name.
+   */
+  explicitProvider?: string;
 };
 
 /** Render the interactive chat and resolve when the user quits. */
 /**
- * Whether Ink can put this process's stdin into raw mode.
+ * Whether the terminal can put this process's stdin into raw mode.
  *
  * Read from the stream Ink will actually use, and by the same test Ink applies
  * internally (`stdin.isTTY`) — Ink 7 throws out of its input handler when that
@@ -1302,17 +1318,55 @@ function rawModeAvailable(stdin: NodeJS.ReadStream = process.stdin): boolean {
   return stdin.isTTY === true;
 }
 
+/**
+ * Start the interface: the first-run setup when nothing is configured, and the
+ * chat otherwise.
+ *
+ * The two are sequential in one Ink instance rather than two processes, so the
+ * screen does not flash and tear down between them. The distinction is made by
+ * asking the registry of configuration rather than by a marker file, so someone
+ * who already has a key never sees the screen at all.
+ */
 export async function startChat(options: StartChatOptions): Promise<void> {
   const ink = await import("ink");
   const stdin = options.stdin ?? process.stdin;
   const interactive = rawModeAvailable(stdin);
+  // The first-run screen, when there is nothing configured and somewhere to put
+  // an answer. `--no-setup` skips it for a scripted or pre-provisioned host, and
+  // an explicit `--provider` counts as configuration on its own.
+  const { shouldRunSetup } = await import("./setup-state.js");
+  const needsSetup =
+    options.setup !== false && interactive && shouldRunSetup(options.explicitProvider !== undefined);
+
   const instance = ink.render(
-    <ChatApp
-      {...options}
+    <Shell
+      needsSetup={needsSetup}
       interactive={interactive}
       onExit={() => instance.unmount()}
+      chat={() => (
+        <ChatApp {...options} interactive={interactive} onExit={() => instance.unmount()} />
+      )}
     />,
     { stdin, exitOnCtrlC: false },
   );
   await instance.waitUntilExit();
+}
+
+/**
+ * Setup, then chat, in one Ink instance.
+ *
+ * One instance rather than two processes so the screen does not tear down and
+ * repaint between them. Setup is a gate, not a dialog over the chat: until a
+ * provider is chosen there is nothing to talk to, and rendering a prompt that
+ * cannot answer is worse than not drawing one.
+ */
+function Shell(props: {
+  needsSetup: boolean;
+  interactive: boolean;
+  chat: () => React.JSX.Element;
+  onExit: () => void;
+}): React.JSX.Element {
+  const [done, setDone] = useState(false);
+  if (!props.needsSetup || done) return props.chat();
+  return <SetupScreen onDone={() => setDone(true)} />;
 }
