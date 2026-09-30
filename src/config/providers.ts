@@ -12,6 +12,14 @@ export interface ProviderDef {
   envKeys: string[];
   /** The keyring stores the secret under JAA_<ID>_API_KEY. */
   keyringEnv: string;
+  /**
+   * Where to get a key.
+   *
+   * Shown by the first-run setup, under the provider's name. "Paste your key"
+   * without saying where to get one is a dead end for anyone who has not already
+   * set one up, and guessing the URL is worse than naming it.
+   */
+  keyUrl?: string;
   /** Whether this provider is local-only (never needs a key). */
   localOnly?: boolean;
   note?: string;
@@ -21,54 +29,63 @@ export const PROVIDERS: readonly ProviderDef[] = [
   {
     id: "openai",
     label: "OpenAI (GPT models)",
+    keyUrl: "https://platform.openai.com/api-keys",
     envKeys: ["OPENAI_API_KEY"],
     keyringEnv: "JAA_OPENAI_API_KEY",
   },
   {
     id: "anthropic",
     label: "Anthropic (Claude models)",
+    keyUrl: "https://console.anthropic.com/settings/keys",
     envKeys: ["ANTHROPIC_API_KEY"],
     keyringEnv: "JAA_ANTHROPIC_API_KEY",
   },
   {
     id: "google",
     label: "Google Gemini",
+    keyUrl: "https://aistudio.google.com/app/apikey",
     envKeys: ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
     keyringEnv: "JAA_GOOGLE_API_KEY",
   },
   {
     id: "groq",
     label: "Groq (fast hosted Llama/Qwen)",
+    keyUrl: "https://console.groq.com/keys",
     envKeys: ["GROQ_API_KEY"],
     keyringEnv: "JAA_GROQ_API_KEY",
   },
   {
     id: "deepseek",
     label: "DeepSeek",
+    keyUrl: "https://platform.deepseek.com/api_keys",
     envKeys: ["DEEPSEEK_API_KEY"],
     keyringEnv: "JAA_DEEPSEEK_API_KEY",
   },
   {
     id: "mistral",
     label: "Mistral",
+    keyUrl: "https://console.mistral.ai/api-keys",
     envKeys: ["MISTRAL_API_KEY"],
     keyringEnv: "JAA_MISTRAL_API_KEY",
   },
   {
     id: "together",
     label: "Together AI",
+    keyUrl: "https://api.together.ai/settings/api-keys",
     envKeys: ["TOGETHER_API_KEY"],
     keyringEnv: "JAA_TOGETHER_API_KEY",
   },
   {
     id: "xai",
     label: "xAI (Grok)",
+    keyUrl: "https://console.x.ai",
     envKeys: ["XAI_API_KEY"],
     keyringEnv: "JAA_XAI_API_KEY",
   },
   {
     id: "azure",
     label: "Azure OpenAI",
+    keyUrl: "https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource",
     envKeys: ["AZURE_OPENAI_API_KEY"],
     keyringEnv: "JAA_AZURE_API_KEY",
   },
